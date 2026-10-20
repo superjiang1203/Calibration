@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "mode": "sensor_extrinsics",
+  "board": {
+    "pattern_cols": 11,
+    "pattern_rows": 8,
+    "square_size_mm": 15
+  },
+  "sensors": [
+    {
+      "label": "orbbec_color",
+      "sensor_config": "../cameras/orbbec_color.json"
+    },
+    {
+      "label": "vcamera_color",
+      "sensor_config": "../cameras/vcamera_color.json"
+    }
+  ],
+  "calibration": {
+    "use_known_intrinsics": true,
+    "fixed_intrinsics": {}
+  }
+}

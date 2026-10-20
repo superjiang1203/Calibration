@@ -8,9 +8,8 @@
   },
   "sensors": [
     {
-      "label": "orbbec_ir_left",
-      "sensor_config": "sensor_orbbec_ir_left.json"
+      "label": "galaxy_gray",
+      "sensor_config": "../cameras/galaxy.json"
     }
-  ],
-  "_comment": "奥比左红外相机单独内参。"
+  ]
 }

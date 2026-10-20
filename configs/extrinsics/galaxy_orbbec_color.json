@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "mode": "sensor_extrinsics",
+  "board": {
+    "pattern_cols": 11,
+    "pattern_rows": 8,
+    "square_size_mm": 15
+  },
+  "sensors": [
+    {
+      "label": "galaxy_gray",
+      "sensor_config": "../cameras/galaxy.json"
+    },
+    {
+      "label": "orbbec_color",
+      "sensor_config": "../cameras/orbbec_color.json"
+    }
+  ],
+  "calibration": {
+    "use_known_intrinsics": false,
+    "fixed_intrinsics": {}
+  }
+}

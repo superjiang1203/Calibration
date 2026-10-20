@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("command", nargs="?", default="run", choices=("run", "capture", "calibrate", "verify"),
                         help="run=采集后标定；capture=只采集；calibrate=使用现有数据；verify=固定已有参数验证新图像")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
-                        help="标定配置 JSON，默认 configs/calibration.json")
+                        help=f"标定配置 JSON，默认 {DEFAULT_CONFIG.relative_to(PROJECT_ROOT).as_posix()}")
     parser.add_argument("--session", type=Path,
                         help="calibrate/verify 使用的数据目录；相对路径以工程根目录为基准")
     parser.add_argument("--calibration-dir", type=Path,

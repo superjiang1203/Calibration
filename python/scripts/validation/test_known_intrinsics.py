@@ -1,4 +1,4 @@
-"""Offline checks for selecting measured K/D versus fitting K/D from images."""
+"""Keep factory K/D fixed while selecting Galaxy measured or fitted K/D."""
 
 import contextlib
 import io
@@ -45,11 +45,8 @@ class KnownIntrinsicsWorkflowTests(unittest.TestCase):
                             max_rms_px=1., max_validation_rmse_px=2.)
         self.sensors = [dict(label="galaxy", sensor_type="galaxy", stream="gray", image_size=[1280, 960]),
                         dict(label="vcamera", sensor_type="vcamera", stream="color", image_size=[1280, 960])]
-        # Deliberately inaccurate SDK data must be ignored in explicit fitting mode.
-        stale_k = self.k.copy()
-        stale_k[0, 0] += 40
         self.sensors[1]["capture_metadata"] = dict(sdk_intrinsics=dict(
-            camera_matrix=stale_k.tolist(), distortion_coefficients=[0.] * 5, image_size=[1280, 960]))
+            camera_matrix=self.k.tolist(), distortion_coefficients=self.d.tolist(), image_size=[1280, 960]))
         directories = sensor_image_directories(self.sensors)
         for sensor in self.sensors:
             sensor["image_directory"] = directories[sensor["label"]]
@@ -94,10 +91,10 @@ class KnownIntrinsicsWorkflowTests(unittest.TestCase):
 
     def test_true_preserves_known_intrinsics_and_recovers_full_extrinsics(self):
         before = {label: Path(path).read_bytes() for label, path in self.fixed.items()}
-        result, fit_count = self.calibrate(True, fixed_intrinsics=self.fixed)
+        result, fit_count = self.calibrate(True, fixed_intrinsics=dict(galaxy=self.fixed["galaxy"]))
         self.assertTrue(result["passed"], result)
         self.assertEqual(fit_count, 0)
-        self.assertEqual(result["intrinsics_mode"], "known_intrinsics")
+        self.assertEqual(result["intrinsics_mode"], "factory_and_known_intrinsics")
         for label, path in self.fixed.items():
             self.assertEqual(Path(path).read_bytes(), before[label])
             camera = _camera(self.root / "output" / f"sensor_{label}_intrinsics.yml")
@@ -117,21 +114,31 @@ class KnownIntrinsicsWorkflowTests(unittest.TestCase):
         self.assertEqual(result["output_files"], [])
         self.assertFalse(list((self.root / "output").glob("*.yml")))
 
-    def test_false_fits_both_models_even_when_sdk_or_yaml_exists(self):
+    def test_false_fits_only_galaxy_and_keeps_factory_sdk_model(self):
+        # A different YAML must neither override SDK K/D nor prevent Galaxy fitting.
+        other_k = self.k.copy()
+        other_k[0, 0] += 40
+        for path in self.fixed.values():
+            write_camera(Path(path), other_k, np.zeros(5))
         result, fit_count = self.calibrate(False, fixed_intrinsics=self.fixed)
         self.assertTrue(result["passed"], result)
-        self.assertEqual(fit_count, 2)
-        self.assertEqual(result["intrinsics_mode"], "estimate_intrinsics")
-        for sensor in result["sensors"].values():
-            self.assertFalse(sensor["intrinsics_fixed"])
-            self.assertEqual(sensor["intrinsics_source"], "checkerboard_fit")
+        self.assertEqual(fit_count, 1)
+        self.assertEqual(result["intrinsics_mode"], "factory_and_estimated_intrinsics")
+        self.assertFalse(result["sensors"]["galaxy"]["intrinsics_fixed"])
+        self.assertEqual(result["sensors"]["galaxy"]["intrinsics_source"], "checkerboard_fit")
+        self.assertTrue(result["sensors"]["vcamera"]["intrinsics_fixed"])
+        self.assertIn("GetFactoryCalibInfo", result["sensors"]["vcamera"]["intrinsics_source"])
+        camera = _camera(self.root / "output" / "sensor_vcamera_intrinsics.yml")
+        np.testing.assert_array_equal(camera["camera_matrix"], self.k)
+        np.testing.assert_array_equal(camera["distortion_coefficients"], self.d)
 
-    def config(self, *, known=True, fixed=None, mode="sensor_extrinsics"):
+    def config(self, *, known=True, fixed=None, mode="sensor_extrinsics", factory=False):
         entries = []
         for index, sensor in enumerate(self.sensors):
             profile_path = self.root / f"profile{index}.json"
             # Generic sources suffice for validating file selections without SDKs.
-            profile_path.write_text(json.dumps(dict(schema_version=1, sensor_type="opencv", sensor_index=index,
+            sensor_type = "vcamera" if factory and index == 1 else "opencv"
+            profile_path.write_text(json.dumps(dict(schema_version=1, sensor_type=sensor_type, sensor_index=index,
                                                     stream="color", width=1280, height=960)), encoding="utf-8")
             entries.append(dict(label=sensor["label"], sensor_config=profile_path.name))
         calibration = dict(use_known_intrinsics=known)
@@ -165,9 +172,38 @@ class KnownIntrinsicsWorkflowTests(unittest.TestCase):
         self.assertIsNone(_fixed_camera(self.sensors[0], {}, (1280, 960)))
         camera, source = _fixed_camera(self.sensors[1], {}, (1280, 960))
         self.assertIn("GetFactoryCalibInfo", source)
-        self.assertEqual(camera["camera_matrix"][0, 0], self.k[0, 0] + 40)
+        np.testing.assert_array_equal(camera["camera_matrix"], self.k)
         camera, _ = _fixed_camera(self.sensors[0], dict(fixed_intrinsics=self.fixed), (1280, 960))
         np.testing.assert_array_equal(camera["camera_matrix"], self.k)
+
+    def test_factory_sdk_wins_over_yaml_for_every_switch_value(self):
+        for vendor in ("vcamera", "orbbec"):
+            sensor = dict(self.sensors[1], sensor_type=vendor)
+            for known in (True, False, None):
+                camera, source = _fixed_camera(sensor, dict(use_known_intrinsics=known,
+                                                           fixed_intrinsics=dict(vcamera="missing.yml")), (1280, 960))
+                np.testing.assert_array_equal(camera["camera_matrix"], self.k)
+                np.testing.assert_array_equal(camera["distortion_coefficients"], self.d)
+                self.assertTrue(source.startswith("capture_metadata."))
+
+    def test_factory_export_fallback_requires_sdk_or_yaml_even_when_switch_false(self):
+        for vendor in ("vcamera", "orbbec"):
+            sensor = dict(label="vcamera", sensor_type=vendor)
+            for known in (True, False, None):
+                options = dict(use_known_intrinsics=known)
+                with self.assertRaisesRegex(ValueError, "factory intrinsics missing"):
+                    _fixed_camera(sensor, options, (1280, 960))
+                camera, source = _fixed_camera(sensor, dict(options, fixed_intrinsics=self.fixed), (1280, 960))
+                np.testing.assert_array_equal(camera["camera_matrix"], self.k)
+                self.assertTrue(source.startswith("factory_sdk_export:"))
+
+    def test_factory_intrinsics_cannot_be_refitted_as_standalone_workflow(self):
+        with self.assertRaisesRegex(ValueError, "only for non-factory cameras"):
+            load_config(self.config(known=False, mode="sensor_intrinsics", factory=True))
+        with self.assertRaisesRegex(ValueError, "only for non-factory cameras"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            calibrate_session(self.session, self.root / "output", self.options, "sensor_intrinsics")
+        self.assertFalse((self.root / "output").exists())
 
 
 if __name__ == "__main__":

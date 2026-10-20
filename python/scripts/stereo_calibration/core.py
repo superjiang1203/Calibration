@@ -1,4 +1,4 @@
-"""Calibrate each imager independently before fitting pairwise extrinsics.
+"""Keep factory camera models fixed while fitting pairwise extrinsics.
 
 All observations are measurements in individual images. Validation images are
 reserved before fitting either intrinsics or extrinsics. Detection failures are
@@ -117,23 +117,17 @@ def _options(options):
 
 
 def _fixed_camera(sensor, opts, image_size):
-    """Select known geometry, or request checkerboard fitting explicitly.
+    """Keep SDK geometry fixed; select measured K/D for non-SDK cameras.
 
-    An omitted switch retains the previous SDK/measured mixed workflow.
-    Explicit false estimates every imager from checkerboards, even with SDK K/D.
-    Explicit true requires known K/D for every imager and never fits a fallback.
+    The switch controls only Galaxy/OpenCV. Factory cameras always use captured
+    SDK K/D; an explicit SDK export is accepted only if metadata has no model.
     """
-    if opts.get("use_known_intrinsics") is False:
-        return None
+    factory = sensor.get("sensor_type") in {"vcamera", "orbbec"}
     path = opts.get("fixed_intrinsics", {}).get(sensor["label"])
-    if path:
-        from ..validation.stereo import _camera
-        camera = _camera(Path(path))
-        source = str(path)
-    elif sensor.get("sensor_type") in {"vcamera", "orbbec"}:
-        data = sensor.get("capture_metadata", {}).get("sdk_intrinsics")
-        if not data:
-            raise ValueError(f"{sensor['sensor_type']} factory intrinsics missing for {sensor['label']}: recapture with SDK K/D or export SDK K/D to OpenCV YAML and set calibration.fixed_intrinsics for this label; measured intrinsics are not a fallback")
+    data = sensor.get("capture_metadata", {}).get("sdk_intrinsics") if factory else None
+    if not factory and opts.get("use_known_intrinsics") is False:
+        return None
+    if data:
         matrix = np.asarray(data["camera_matrix"], np.float64)
         distortion = np.asarray(data["distortion_coefficients"], np.float64).reshape(-1)
         if (matrix.shape != (3, 3) or not np.isfinite(matrix).all()
@@ -145,12 +139,18 @@ def _fixed_camera(sensor, opts, image_size):
                       image_size=tuple(data.get("image_size") or sensor.get("capture_metadata", {}).get("image_size") or ()))
         source = ("capture_metadata.GetFactoryCalibInfo(Texture)" if sensor["sensor_type"] == "vcamera"
                   else "capture_metadata.OrbbecStreamProfile.get_intrinsic/get_distortion")
+    elif path:
+        from ..validation.stereo import _camera
+        camera = _camera(Path(path))
+        source = f"factory_sdk_export:{path}" if factory else str(path)
+    elif factory:
+        raise ValueError(f"{sensor['sensor_type']} factory intrinsics missing for {sensor['label']}: recapture with SDK K/D or export SDK K/D to OpenCV YAML and set calibration.fixed_intrinsics for this label; checkerboard fitting is disabled for factory cameras")
     else:
         if opts.get("use_known_intrinsics") is True:
             raise ValueError(f"Known intrinsics required for {sensor['label']}: set calibration.fixed_intrinsics.{sensor['label']} to a measured OpenCV YAML file; checkerboard fitting is disabled")
         return None
     if tuple(camera["image_size"]) != tuple(image_size):
-        raise ValueError(f"Factory model resolution {camera['image_size']} differs from images {image_size}; provide the SDK model for the actual mode")
+        raise ValueError(f"Known model resolution {camera['image_size']} differs from images {image_size}; provide K/D for the actual mode")
     return camera, source
 
 
@@ -377,10 +377,13 @@ def calibrate_session(session: Path, output_dir: Path, options: dict, mode: str)
         raise ValueError("Unsupported calibration mode")
     if mode == "sensor_intrinsics" and opts.get("use_known_intrinsics") is True:
         raise ValueError("use_known_intrinsics=true requires mode sensor_extrinsics")
-    intrinsics_mode = ("estimate_intrinsics" if mode == "sensor_intrinsics" or opts.get("use_known_intrinsics") is False
-                       else "known_intrinsics" if opts.get("use_known_intrinsics") is True else "legacy_mixed")
+    intrinsics_mode = ("estimate_intrinsics" if mode == "sensor_intrinsics"
+                       else "factory_and_estimated_intrinsics" if opts.get("use_known_intrinsics") is False
+                       else "factory_and_known_intrinsics" if opts.get("use_known_intrinsics") is True else "legacy_mixed")
     print(f"Intrinsic calibration strategy: {intrinsics_mode}")
     raw, manifest, sensors, images, captures, pattern, objects, square = _load_manifest(session)
+    if mode == "sensor_intrinsics" and any(sensor.get("sensor_type") in {"vcamera", "orbbec"} for sensor in sensors):
+        raise ValueError("Factory camera intrinsics are supplied by the Vcamera/Orbbec SDK; sensor_intrinsics is only for non-factory cameras")
     output_dir.mkdir(parents=True, exist_ok=True)
     result = {"schema_version": 1, "created_at_utc": utc_now_iso(),
               "session": str(session), "manifest": str(manifest), "mode": mode,

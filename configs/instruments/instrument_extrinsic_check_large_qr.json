@@ -1,5 +1,5 @@
 {
-  "workflow_config": "configs/calibration_galaxy_vcamera_color.json",
+  "workflow_config": "configs/extrinsics/galaxy_vcamera_color.json",
   "calibration_dir": "output/20261012_114922_123682",
   "geometry_file": null,
   "detect_max_dim": 1600,

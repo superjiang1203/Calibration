@@ -1,9 +1,6 @@
 # Local captures and calibration results
 /data/
 /output/
-/configs/known_intrinsics/*.yml
-/configs/known_intrinsics/*.yaml
-/configs/vcamera_factory_texture.yml
 
 # Keep only packaged SDKs and their documentation
 /thirdparty/*

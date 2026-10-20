@@ -10,7 +10,7 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "calibration.json"
+DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "extrinsics" / "galaxy_vcamera_color.json"
 MODES = ("sensor_intrinsics", "sensor_extrinsics")
 _LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _PROFILE_KEYS = {
@@ -198,6 +198,8 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
     if mode == "sensor_extrinsics" and len(entries) != 2:
         raise ValueError("sensor_extrinsics requires exactly two sensors")
     sensors = [_sensor(entry, config_path.parent) for entry in entries]
+    if mode == "sensor_intrinsics" and any(sensor["sensor_type"] in {"vcamera", "orbbec"} for sensor in sensors):
+        raise ValueError("Factory camera intrinsics are supplied by the Vcamera/Orbbec SDK; sensor_intrinsics is only for non-factory cameras")
     if len({sensor["label"].casefold() for sensor in sensors}) != len(sensors):
         raise ValueError("Sensor labels must be unique (case-insensitive)")
     identities = [(s["sensor_type"], (s.get("serial_number") or s.get("ip_address") or s["sensor_index"]) if s["sensor_type"] == "vcamera" else s["sensor_index"], s["stream"] if s["sensor_type"] == "orbbec" else None) for s in sensors]
@@ -239,6 +241,10 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
     if mode == "sensor_extrinsics" and known is not False:
         for sensor in sensors:
             label = sensor["label"]
+            # Factory K/D is selected from capture metadata during calibration.
+            # A YAML is a fallback for older SDK exports, never an override.
+            if sensor["sensor_type"] in {"orbbec", "vcamera"}:
+                continue
             fixed_path = calibration_defaults["fixed_intrinsics"].get(label)
             if fixed_path:
                 # Fail before opening devices if the selected model is missing,
@@ -248,7 +254,7 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
                 size = (sensor["width"], sensor["height"])
                 if all(size) and camera["image_size"] != size:
                     raise ValueError(f"Known model resolution {camera['image_size']} differs from {label} profile {size}")
-            elif known is True and sensor["sensor_type"] not in {"orbbec", "vcamera"}:
+            elif known is True:
                 raise ValueError(f"Known intrinsics required for {label}: set calibration.fixed_intrinsics.{label} to a measured OpenCV YAML file")
     if calibration_defaults["model"] not in ("standard", "rational"):
         raise ValueError("calibration.model must be standard or rational")

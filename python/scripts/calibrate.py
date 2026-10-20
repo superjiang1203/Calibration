@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run sensor calibration using configs/calibration.json."""
+"""Run sensor calibration using the selected workflow JSON."""
 
 import sys
 from pathlib import Path
