@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "sensor_type": "orbbec",
+  "sensor_index": 0,
+  "stream": "ir_right",
+  "width": 1280,
+  "height": 800,
+  "acquisition_fps": 30,
+  "pixel_format": "Y8",
+  "exposure_sdk": 12000,
+  "exposure_auto": false,
+  "gain_sdk": 16,
+  "laser_mode": 0,
+  "_comments": {
+    "stream": "SDK 右红外原始流；与同一设备左红外配对时，分辨率、帧率、曝光、增益和像素格式必须一致。",
+    "exposure_sdk": "Orbbec SDK 原生曝光整数，不假定其单位为微秒。"
+  }
+}

@@ -1,0 +1,5 @@
+# Vcamera 26.1.15 requires NumPy 2.x on Python >=3.9.
+# Live capture needs GUI-enabled OpenCV. Install camera bindings separately.
+numpy>=2.0,<2.3
+opencv-contrib-python>=4.8
+PyYAML>=6.0

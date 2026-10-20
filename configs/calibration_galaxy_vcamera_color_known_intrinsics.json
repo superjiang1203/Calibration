@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "mode": "sensor_extrinsics",
+  "board": {
+    "pattern_cols": 11,
+    "pattern_rows": 8,
+    "square_size_mm": 15
+  },
+  "sensors": [
+    {
+      "label": "galaxy_gray",
+      "sensor_config": "sensor_galaxy.json"
+    },
+    {
+      "label": "vcamera_color",
+      "sensor_config": "sensor_vcamera_color.json"
+    }
+  ],
+  "_comment": "大恒灰度 → 图漾原始 Texture 彩色外参；固定已知内参。fixed_intrinsics 文件优先，否则图漾/奥比使用本次采集记录的 SDK 内参。大恒须提供同一采集模式的真实内参 YAML。",
+  "calibration": {
+    "use_known_intrinsics": true,
+    "fixed_intrinsics": {
+      "galaxy_gray": "known_intrinsics/galaxy_gray.yml"
+    }
+  }
+}

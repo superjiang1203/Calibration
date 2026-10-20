@@ -1,0 +1,15 @@
+{
+  "workflow_config": "configs/calibration_galaxy_vcamera_color.json",
+  "calibration_dir": "output/20261012_114922_123682",
+  "geometry_file": "configs/instruments/navigation_stick_13mm.yaml",
+  "detect_max_dim": 1600,
+  "max_pose_rms_px": 2.0,
+  "max_frame_age_seconds": 1.0,
+  "translation_range_mm": 30.0,
+  "translation_step_mm": 0.1,
+  "_comments": {
+    "geometry_file": "Geometry snapshot copied from neuro_navi/server/assets/markers/iron_double_cube_middle_square_ba.yaml; preserves calibrated marker positions and tip offset in mm.",
+    "translation": "XYZ 增量单位 mm，沿 Vcamera RGB 光学坐标轴，R 不变，T_new=T_original+delta。"
+  },
+  "min_visible_markers": 1
+}

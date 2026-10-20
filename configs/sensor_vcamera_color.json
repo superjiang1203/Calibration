@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "sensor_type": "vcamera",
+  "sensor_index": 0,
+  "stream": "color",
+  "width": 0,
+  "height": 0,
+  "acquisition_fps": 0,
+  "serial_number": "",
+  "ip_address": "",
+  "_comments": {
+    "width": "0 selects the largest supported raw BGR24 texture resolution; set width and height to select an exact mode.",
+    "sensor_index": "Zero-based discovery index; prefer serial_number or ip_address for multiple devices."
+  }
+}

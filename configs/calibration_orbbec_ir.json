@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "mode": "sensor_extrinsics",
+  "board": {
+    "pattern_cols": 11,
+    "pattern_rows": 8,
+    "square_size_mm": 15
+  },
+  "sensors": [
+    {
+      "label": "orbbec_ir_left",
+      "sensor_config": "sensor_orbbec_ir_left.json"
+    },
+    {
+      "label": "orbbec_ir_right",
+      "sensor_config": "sensor_orbbec_ir_right.json"
+    }
+  ],
+  "_comment": "奥比左红外 → 右红外内参＋外参：从同批棋盘图像重新估计两端内参，再求相机间外参。",
+  "calibration": {
+    "use_known_intrinsics": false
+  }
+}

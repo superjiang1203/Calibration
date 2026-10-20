@@ -1,0 +1,33 @@
+# Local captures and calibration results
+/data/
+/output/
+/configs/known_intrinsics/*.yml
+/configs/known_intrinsics/*.yaml
+/configs/vcamera_factory_texture.yml
+
+# Keep only packaged SDKs and their documentation
+/thirdparty/*
+!/thirdparty/README.md
+!/thirdparty/SHA256SUMS
+!/thirdparty/licenses/
+!/thirdparty/wheels/
+/thirdparty/wheels/*
+!/thirdparty/wheels/*.whl
+!/thirdparty/wheels/*.json
+!/thirdparty/wheels/*.txt
+!/thirdparty/wheels/*.md
+
+# Environments, editor settings and build products
+.venv*/
+venv/
+.vscode/
+.idea/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+/build/
+/dist/
+*.log

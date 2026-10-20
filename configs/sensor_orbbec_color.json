@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "sensor_type": "orbbec",
+  "sensor_index": 0,
+  "stream": "color",
+  "width": 1280,
+  "height": 800,
+  "acquisition_fps": 30,
+  "exposure_sdk": 80,
+  "exposure_auto": false,
+  "white_balance_mode": "auto_lock",
+  "white_balance_kelvin": null,
+  "white_balance_warmup_frames": 30,
+  "_comments": {
+    "sensor_index": "Orbbec SDK 设备序号，从 0 开始。",
+    "stream": "选择彩色传感器；标定时用当前帧灰度图检测角点。",
+    "exposure_sdk": "厂商 SDK 原生曝光整数，不假定其单位为微秒；null 表示关闭自动曝光后保留当前曝光。",
+    "white_balance_mode": "auto_lock=先自动白平衡，稳定后锁定；auto=持续自动；manual=使用 white_balance_kelvin。白平衡不会修复过曝。"
+  }
+}

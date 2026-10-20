@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "sensor_type": "orbbec",
+  "sensor_index": 0,
+  "stream": "ir_left",
+  "width": 1280,
+  "height": 800,
+  "acquisition_fps": 30,
+  "pixel_format": "Y8",
+  "exposure_sdk": 12000,
+  "exposure_auto": false,
+  "gain_sdk": 16,
+  "laser_mode": 0,
+  "_comments": {
+    "stream": "SDK 左红外原始流，可单独计算内参，也可与右红外同步计算内参和外参。",
+    "exposure_sdk": "Orbbec SDK 原生曝光整数；与右红外共用控制时配置必须一致，不假定其单位。",
+    "pixel_format": "Y8 或 Y16；保存原始像素，不保存带角点标记的预览。",
+    "laser_mode": "0=关闭投射器，1=开启，2=自动。棋盘标定建议 0，避免投射散斑干扰角点。"
+  }
+}

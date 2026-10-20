@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "mode": "sensor_intrinsics",
+  "board": {
+    "pattern_cols": 11,
+    "pattern_rows": 8,
+    "square_size_mm": 15
+  },
+  "sensors": [
+    {
+      "label": "vcamera_color",
+      "sensor_config": "sensor_vcamera_color.json"
+    }
+  ],
+  "_comment": "图漾原始 Texture 彩色相机单独内参；与 SDK 厂家参数比较时保持原始成像模式一致。"
+}

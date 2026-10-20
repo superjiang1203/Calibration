@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "sensor_type": "galaxy",
+  "sensor_index": 1,
+  "stream": "gray",
+  "width": 4504,
+  "height": 4504,
+  "offset_x": null,
+  "offset_y": null,
+  "exposure_auto": false,
+  "exposure_us": 30000.0,
+  "gain_auto": false,
+  "gain_db": 0.0,
+  "gamma_enabled": false,
+  "pixel_format": "Mono8",
+  "acquisition_fps": 0.0,
+  "galaxy_backend": "gxipy",
+  "gxipy_path": null,
+  "notes": "",
+  "_comments": {
+    "sensor_index": "大恒设备序号，从 1 开始；gxipy 后端先筛选 Daheng 厂商，忽略其他厂商的 GigE 相机。",
+    "width": "原始采集 ROI 宽度；0 表示设备允许的最大宽度，不是软件缩放尺寸。",
+    "height": "原始采集 ROI 高度；0 表示设备允许的最大高度。",
+    "offset_x": "ROI 偏移；null 表示按实际采集宽高居中。",
+    "exposure_us": "Galaxy 曝光时间，单位微秒；null 表示关闭自动曝光后保留当前值。",
+    "acquisition_fps": "0 表示关闭应用设置的相机帧率上限。",
+    "gxipy_path": "null 表示自动查找 Galaxy SDK Python 示例；也可填写路径，相对路径以本文件目录为基准。"
+  }
+}

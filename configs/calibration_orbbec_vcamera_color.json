@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "mode": "sensor_extrinsics",
+  "board": {
+    "pattern_cols": 11,
+    "pattern_rows": 8,
+    "square_size_mm": 15
+  },
+  "sensors": [
+    {
+      "label": "orbbec_color",
+      "sensor_config": "sensor_orbbec_color.json"
+    },
+    {
+      "label": "vcamera_color",
+      "sensor_config": "sensor_vcamera_color.json"
+    }
+  ],
+  "_comment": "奥比彩色 → 图漾原始 Texture 彩色内参＋外参：从同批棋盘图像重新估计两端内参，再求相机间外参。",
+  "calibration": {
+    "use_known_intrinsics": false
+  }
+}

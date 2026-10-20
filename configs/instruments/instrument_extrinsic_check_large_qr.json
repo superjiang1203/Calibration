@@ -1,0 +1,28 @@
+{
+  "workflow_config": "configs/calibration_galaxy_vcamera_color.json",
+  "calibration_dir": "output/20261012_114922_123682",
+  "geometry_file": null,
+  "detect_max_dim": 1600,
+  "max_pose_rms_px": 2.0,
+  "max_frame_age_seconds": 1.0,
+  "translation_range_mm": 30.0,
+  "translation_step_mm": 0.1,
+  "min_visible_markers": 1,
+  "point_label": "TIP",
+  "point_name": "末端",
+  "show_marker_projection": true,
+  "single_marker": {
+    "dictionary": "DICT_APRILTAG_36h11",
+    "id": null,
+    "allow_unique_id": true,
+    "size_mm": 39.0,
+    "tip_offset_mm": [0.0, -145.0, -3.95],
+    "apply_rx180": true
+  },
+  "_comments": {
+    "source": "导航工程 server/assets/markers/large_qr.yaml 使用 DICT_APRILTAG_36h11；Tag36h11MarkerModel 默认码边长为 39 mm。",
+    "size_mm": "码黑色外边界的实测边长，单位 mm；若实物不是 39 mm，请修改。",
+    "id": "null 仅接受画面中唯一的 AprilTag；多个码时不输出位姿。也可指定实际 ID。",
+    "tip_offset_mm": "使用导航工程 Tag36h11MarkerModel 默认末端偏移 [0,145,-3.95] mm；tip=center+R*Rx180*offset，与导航工程的 applyRx180=true 一致。"
+  }
+}
