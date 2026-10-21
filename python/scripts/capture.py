@@ -38,7 +38,10 @@ class OrbbecIRSource:
         try:
             import pyorbbecsdk as sdk
         except ImportError as error:
-            raise RuntimeError('Use the cylmarker environment with pyorbbecsdk2 installed') from error
+            raise RuntimeError(
+                f'Orbbec SDK import failed: {error}. '
+                'Install with this Python: python -m python.scripts.install_sdks orbbec'
+            ) from error
         self.sdk = sdk
         disable_orbbec_logging(sdk)
         sensor = self.sensors[0]

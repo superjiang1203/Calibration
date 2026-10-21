@@ -36,5 +36,5 @@ def require_gui_support():
                 cv2.getBuildInformation().splitlines() if line.strip().startswith('GUI:')), 'UNKNOWN')
     if gui in ('NONE', 'NO', ''):
         raise RuntimeError(f'OpenCV has no GUI support (GUI={gui}). Current Python: {sys.executable}. '
-                           'Run conda activate cylmarker, or use '
-                           r'C:\Users\lijy8\.conda\envs\cylmarker\python.exe directly.')
+                           'Install GUI-enabled OpenCV in this environment using '
+                           'python -m pip install -r requirements-calibration.txt.')

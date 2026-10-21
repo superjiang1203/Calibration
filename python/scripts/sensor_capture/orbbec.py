@@ -29,7 +29,10 @@ def _orbbec_camera_class():
     try:
         from OrbbecCamera import OrbbecCamera
     except ImportError as error:
-        raise RuntimeError("Orbbec SDK import failed; use the cylmarker environment with pyorbbecsdk2 installed") from error
+        raise RuntimeError(
+            f"Orbbec SDK import failed: {error}. Current Python: {sys.executable}. "
+            "Install with this Python: python -m python.scripts.install_sdks orbbec"
+        ) from error
     return OrbbecCamera
 
 

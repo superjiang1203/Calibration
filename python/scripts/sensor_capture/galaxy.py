@@ -79,7 +79,7 @@ def import_gxipy(explicit_path: str | None = None):
 
 
 class GxipyGalaxySource(FrameSource):
-    """Official Galaxy SDK Python backend, primarily for native Windows."""
+    """Official Galaxy SDK Python backend for Linux and Windows."""
 
     backend_name = "galaxy-gxipy"
 
@@ -275,6 +275,101 @@ class GxipyGalaxySource(FrameSource):
                 feature.set(aligned)
             self._expected_roi[name] = aligned
 
+    def _open_camera(self):
+        try:
+            return self.manager.open_device_by_index(self.device_info['index'])
+        except Exception as exc:
+            # gxipy's SDK exceptions have no shared vendor-specific base class.
+            # Leave ordinary Python errors visible as programming failures.
+            if type(exc).__module__ != "gxipy.Exception":
+                raise
+            message = (
+                "Galaxy SDK could not open "
+                f"model {self.device_info.get('model_name', 'unknown')!r}, "
+                f"SN {self.device_info.get('sn', 'unknown')!r}, "
+                f"native device index {self.device_info['index']} "
+                "before applying ROI/exposure settings: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            linux_xml_error = sys.platform.startswith("linux") and "__ReadXML" in str(exc)
+            if linux_xml_error:
+                message += (
+                    "; the SDK failed while reading camera XML. "
+                    "Inspect USB resets/disconnects with journalctl -k -b "
+                    "to check for a communication failure."
+                )
+            serial = str(self.device_info.get('sn') or '')
+            usb3_class = getattr(getattr(self.gx, "GxDeviceClassList", None), "U3V", None)
+            recoverable = (
+                linux_xml_error
+                and type(exc).__name__ == "InvalidParameter"
+                and usb3_class is not None
+                and self.device_info.get('device_class') == usb3_class
+                and bool(serial.strip())
+            )
+            if not recoverable:
+                raise RuntimeError(message) from exc
+
+            print(f"Warning: {message}", file=sys.stderr)
+            print(
+                f"Galaxy recovery: wait 1 second, rediscover SN {serial!r}, "
+                "and retry opening that same USB3 camera once.", file=sys.stderr,
+            )
+            time.sleep(1.0)
+            try:
+                if hasattr(self.manager, "update_all_device_list"):
+                    _, device_infos = self.manager.update_all_device_list()
+                else:
+                    _, device_infos = self.manager.update_device_list()
+            except Exception as retry_exc:
+                if type(retry_exc).__module__ != "gxipy.Exception":
+                    raise
+                raise RuntimeError(
+                    f"{message}; recovery discovery failed: "
+                    f"{type(retry_exc).__name__}: {retry_exc}"
+                ) from retry_exc
+            matching_devices = [
+                info for info in device_infos
+                if 'daheng' in str(info.get('vendor_name', '')).casefold()
+                and str(info.get('sn') or '') == serial
+            ]
+            if len(matching_devices) != 1:
+                reason = (
+                    "was not rediscovered" if not matching_devices
+                    else "matched multiple Daheng devices after rediscovery"
+                )
+                raise RuntimeError(
+                    f"{message}; recovery failed: original camera SN {serial!r} "
+                    f"{reason}; no recovery open was attempted."
+                ) from exc
+            if matching_devices[0].get('device_class') != usb3_class:
+                raise RuntimeError(
+                    f"{message}; recovery failed: original camera SN {serial!r} "
+                    "was rediscovered with a different device class; "
+                    "no recovery open was attempted."
+                ) from exc
+            self.device_info = dict(matching_devices[0])
+            try:
+                camera = self.manager.open_device_by_index(self.device_info['index'])
+            except Exception as retry_exc:
+                if type(retry_exc).__module__ != "gxipy.Exception":
+                    raise
+                raise RuntimeError(
+                    f"{message}; the one recovery attempt for SN {serial!r}, "
+                    f"native device index {self.device_info['index']}, failed: "
+                    f"{type(retry_exc).__name__}: {retry_exc}"
+                ) from retry_exc
+            self._configuration_warnings.append(
+                f"Recovered Galaxy USB3 camera SN {serial!r} after an initial "
+                f"InvalidParameter __ReadXML error: {exc}; one retry used "
+                f"rediscovered native device index {self.device_info['index']}"
+            )
+            print(
+                f"Galaxy recovery succeeded: reopened SN {serial!r}, "
+                f"native device index {self.device_info['index']}.", file=sys.stderr,
+            )
+            return camera
+
     def open(self) -> None:
         self._configuration_verified = False
         self._configuration_warnings = []
@@ -298,8 +393,8 @@ class GxipyGalaxySource(FrameSource):
                 f"Galaxy camera index {self.sensor_index} exceeds {len(galaxy_devices)} Daheng device(s)"
             )
         self.device_info = dict(galaxy_devices[self.sensor_index - 1])
-        self.camera = self.manager.open_device_by_index(self.device_info['index'])
         try:
+            self.camera = self._open_camera()
             self.feature_control = self.camera.get_remote_device_feature_control()
             self._set_enum_if_writable("AcquisitionMode", "Continuous")
             self._set_enum_if_writable("TriggerMode", "Off")
@@ -449,6 +544,8 @@ class GxipyGalaxySource(FrameSource):
 
     def close(self) -> None:
         if self.camera is None:
+            self.feature_control = None
+            self.manager = None
             return
         if self._streaming:
             try:
@@ -462,6 +559,7 @@ class GxipyGalaxySource(FrameSource):
             pass
         self.camera = None
         self.feature_control = None
+        self.manager = None
 
 
 class CtypesGalaxySource(FrameSource):
