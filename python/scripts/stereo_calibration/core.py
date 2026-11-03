@@ -137,10 +137,10 @@ def _fixed_camera(sensor, opts, image_size):
             raise ValueError("Invalid captured SDK K/D")
         camera = dict(camera_matrix=matrix, distortion_coefficients=distortion,
                       image_size=tuple(data.get("image_size") or sensor.get("capture_metadata", {}).get("image_size") or ()))
-        source = ("capture_metadata.GetFactoryCalibInfo(Texture)" if sensor["sensor_type"] == "vcamera"
+        source = ("capture_metadata." + data.get("source", "GetFactoryCalibInfo(Texture)") if sensor["sensor_type"] == "vcamera"
                   else "capture_metadata.OrbbecStreamProfile.get_intrinsic/get_distortion")
     elif path:
-        from ..validation.stereo import _camera
+        from .verification import _camera
         camera = _camera(Path(path))
         source = f"factory_sdk_export:{path}" if factory else str(path)
     elif factory:

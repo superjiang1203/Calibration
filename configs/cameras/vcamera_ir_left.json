@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "sensor_type": "vcamera",
+  "sensor_index": 0,
+  "stream": "ir_left",
+  "width": 2048,
+  "height": 1536,
+  "exposure": 17000.0,
+  "gain": 100,
+  "_comments": {
+    "exposure": "曝光时间，单位微秒。",
+    "gain": "增益使用设备原生单位；null 保留设备设置。"
+  }
+}

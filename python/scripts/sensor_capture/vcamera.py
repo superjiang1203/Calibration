@@ -16,7 +16,10 @@ class VcameraSource(FrameSource):
         self.camera = VcameraCamera(
             target_width=args.width, target_height=args.height,
             sensor_index=args.sensor_index, serial_number=args.serial_number,
-            ip_address=args.ip_address)
+            ip_address=args.ip_address, stream=getattr(args, 'stream', 'color'),
+            exposure_us=getattr(args, 'exposure_us', None),
+            gain_sdk=getattr(args, 'gain_sdk', None),
+            gain_feature=getattr(args, 'gain_feature', None))
 
     def open(self):
         self.camera.open()

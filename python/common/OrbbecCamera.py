@@ -1,22 +1,4 @@
-# ******************************************************************************
-# OrbbecCamera：封装 pyorbbecsdk 的最小相机采集类，不依赖 cylindertag_cpp。
-#
-# 用途：
-#   1. 单独验证 Orbbec 相机 + SDK 这一层是否正常工作（与 C++ CylinderTag 处理解耦）；
-#   2. 作为一个可复用的相机模块，被其它脚本（比如真正跑 CylinderTag 的脚本）import
-#      之后实例化使用，而不用每次都重写 pipeline/config 的初始化逻辑。
-#
-# 用法示例：
-#   with OrbbecCamera() as cam:
-#       frame = cam.read()
-#
-# 或者：
-#   cam = OrbbecCamera()
-#   cam.open()
-#   frame = cam.read()
-#   cam.close()
-# ******************************************************************************
-import time
+"""Orbbec SDK color capture wrapper used by the calibration adapter."""
 from typing import Optional
 
 import cv2
@@ -33,7 +15,6 @@ from pyorbbecsdk import (
     VideoStreamProfile,
 )
 
-ESC_KEY = 27
 
 
 class OrbbecCamera:
@@ -226,86 +207,3 @@ class OrbbecCamera:
 
         rgb = reshape3(rgb_frame.get_data())
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-
-
-# ---------------------------------------------------------------------- #
-# 测试用例：直接运行本文件即可验证相机是否能正常采集、显示、计算 FPS
-#   python orbbec_camera.py
-#   按 q 或 ESC 退出
-# ---------------------------------------------------------------------- #
-def _test_basic_capture_and_display():
-    """测试1：open -> 循环read -> 显示画面 + FPS -> close"""
-    print("\n[Test] 基本采集+显示测试，按 q / ESC 退出")
-    DISPLAY_WIDTH, DISPLAY_HEIGHT = 1920, 1080
-
-    with OrbbecCamera() as cam:
-        fps_counter = 0
-        fps_timer = time.time()
-        fps_value: Optional[float] = None
-
-        while True:
-            frame = cam.read(timeout_ms=100)
-            if frame is None:
-                continue
-
-            display = frame.copy()
-
-            fps_counter += 1
-            now = time.time()
-            if now - fps_timer >= 1.0:
-                fps_value = fps_counter / (now - fps_timer)
-                fps_timer = now
-                fps_counter = 0
-
-            if fps_value is not None:
-                cv2.putText(
-                    display, f"FPS: {fps_value:.1f}", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2,
-                )
-
-            view = (
-                display
-                if (display.shape[1], display.shape[0]) == (DISPLAY_WIDTH, DISPLAY_HEIGHT)
-                else cv2.resize(display, (DISPLAY_WIDTH, DISPLAY_HEIGHT), interpolation=cv2.INTER_AREA)
-            )
-            cv2.imshow("OrbbecCamera Test", view)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ESC_KEY or key == ord("q"):
-                break
-
-    cv2.destroyAllWindows()
-    print("[Test] 基本采集+显示测试结束")
-
-
-def _test_intrinsics_and_single_frame():
-    """测试2：只验证 open() 是否成功、内参是否能读到、能否取到至少一帧"""
-    print("\n[Test] 内参 + 单帧采集测试")
-    cam = OrbbecCamera()
-    try:
-        cam.open()
-        assert cam.is_open, "open() 之后 is_open 应为 True"
-
-        camera_matrix, dist_coeffs = cam.get_camera_matrix_and_dist_coeffs()
-        assert camera_matrix is not None, "cameraMatrix 不应为空"
-        print(f"[Test] cameraMatrix=\n{camera_matrix}")
-        print(f"[Test] distCoeffs={dist_coeffs}")
-
-        frame = None
-        for _ in range(30):  # 最多重试30次，等相机出第一帧
-            frame = cam.read(timeout_ms=200)
-            if frame is not None:
-                break
-        assert frame is not None, "30次重试内未能取到任何帧，检查相机连接"
-        print(f"[Test] 取到帧，shape={frame.shape}")
-        print("[Test] PASSED")
-    finally:
-        cam.close()
-
-
-def main():
-    _test_intrinsics_and_single_frame()
-    _test_basic_capture_and_display()
-
-
-if __name__ == "__main__":
-    main()

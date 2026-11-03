@@ -2,4 +2,3 @@
 # Live capture needs GUI-enabled OpenCV. Install camera bindings separately.
 numpy>=2.0,<2.3
 opencv-contrib-python>=4.8
-PyYAML>=6.0

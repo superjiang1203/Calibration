@@ -103,7 +103,7 @@ def main(argv=None) -> int:
         options = dict(config["calibration"], max_pair_delta_ms=config["capture"]["max_pair_delta_ms"])
         output = None
         if args.command == "verify":
-            from ..validation.stereo import verify_session
+            from ..stereo_calibration.verification import verify_session
 
             calibration_dir = _session_path(args.calibration_dir)
             print(f"Fixed calibration parameters: {calibration_dir}")

@@ -1,4 +1,4 @@
-"""Read-only validation of saved intrinsics and extrinsics on another capture."""
+"""Read-only calibration quality evaluation on another captured checkerboard session."""
 
 from pathlib import Path
 
@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 from ..sensor_intrinsics.core import verify_observations
-from ..stereo_calibration.core import _detect_image, _image_path, _load_manifest, _options, _select_order, _summary
+from .core import _detect_image, _image_path, _load_manifest, _options, _select_order, _summary
 
 
 def _read_yaml(path, keys):

@@ -22,6 +22,36 @@ def disable_orbbec_logging(sdk):
     sdk.Context.set_logger_level(sdk.OBLogLevel.NONE)
 
 
+def configure_orbbec_gain(device, sdk, stream, requested, original_settings=None):
+    """Set color/IR gain in native integer units; None preserves the device value."""
+    if requested is None:
+        return {}
+    if type(requested) is not int or requested < 0:
+        raise ValueError('Orbbec gain_sdk must be a nonnegative integer or None')
+    name = 'OB_PROP_COLOR_GAIN_INT' if stream == 'color' else 'OB_PROP_IR_GAIN_INT'
+    prop = getattr(sdk.OBPropertyID, name)
+    if not all(device.is_property_supported(prop, permission) for permission in (
+            sdk.OBPermissionType.PERMISSION_READ, sdk.OBPermissionType.PERMISSION_WRITE)):
+        raise RuntimeError(f'Orbbec {name} does not support reading and setting gain')
+    limits = device.get_int_property_range(prop)
+    low, high, step = int(limits.min), int(limits.max), int(limits.step)
+    if low > high or step < 0:
+        raise RuntimeError(f'Orbbec {name}: invalid gain range')
+    if not low <= requested <= high:
+        raise ValueError(f'Orbbec {name}: gain_sdk={requested} outside supported range [{low}, {high}]')
+    if step > 0 and (requested - low) % step:
+        raise ValueError(f'Orbbec {name}: gain_sdk must follow step {step} from {low}')
+    if original_settings is not None:
+        original_settings.append((prop, 'int', device.get_int_property(prop)))
+    device.set_int_property(prop, requested)
+    actual = device.get_int_property(prop)
+    if actual != requested:
+        raise RuntimeError(f'Orbbec {name}: gain readback {actual} differs from requested {requested}')
+    print(f'Orbbec: gain={actual} (device units)')
+    return dict(gain_sdk=actual, requested_gain_sdk=requested, gain_range_sdk=[low, high],
+                gain_step_sdk=step, gain_property=name, gain_units='sdk_native')
+
+
 def _orbbec_camera_class():
     common_root = Path(__file__).resolve().parents[2] / "common"
     if str(common_root) not in sys.path:
@@ -94,6 +124,7 @@ class OrbbecSensorSource(FrameSource):
             raise RuntimeError('Orbbec auto exposure was not disabled')
         if self.args.exposure_sdk is not None and actual != self.args.exposure_sdk:
             raise RuntimeError(f'Orbbec exposure readback differs: requested {self.args.exposure_sdk}, actual {actual}')
+        gain = configure_orbbec_gain(device, sdk, 'color', getattr(self.args, 'gain_sdk', None))
         camera.pipeline.start(camera.config)
         camera._is_open = True
         wb = self._configure_white_balance(device, sdk)
@@ -101,7 +132,7 @@ class OrbbecSensorSource(FrameSource):
         self.features = dict(width=profile.get_width(), height=profile.get_height(),
             device_serial=self.serial,
             fps=profile.get_fps(), exposure_auto=False, exposure_sdk=actual,
-            **wb,
+            **wb, **gain,
             pixel_format=str(profile.get_format()))
 
     def _configure_white_balance(self, device, sdk):

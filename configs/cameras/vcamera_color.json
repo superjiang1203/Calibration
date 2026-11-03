@@ -5,11 +5,10 @@
   "stream": "color",
   "width": 0,
   "height": 0,
-  "acquisition_fps": 0,
-  "serial_number": "",
-  "ip_address": "",
+  "exposure": null,
+  "gain": null,
   "_comments": {
-    "width": "0 selects the largest supported raw BGR24 texture resolution; set width and height to select an exact mode.",
-    "sensor_index": "Zero-based discovery index; prefer serial_number or ip_address for multiple devices."
+    "exposure": "曝光时间，单位微秒。",
+    "gain": "增益使用设备原生单位；null 保留设备设置。"
   }
 }

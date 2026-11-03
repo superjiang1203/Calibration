@@ -18,6 +18,8 @@ def create_frame_source(args) -> FrameSource:
             args.width,
             args.height,
             args.acquisition_fps,
+            gain_sdk=getattr(args, 'gain_sdk', None),
+            exposure_sdk=getattr(args, 'exposure_sdk', None),
         )
 
     if args.source != "galaxy":

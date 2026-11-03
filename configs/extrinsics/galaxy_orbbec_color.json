@@ -4,7 +4,7 @@
   "board": {
     "pattern_cols": 11,
     "pattern_rows": 8,
-    "square_size_mm": 15
+    "square_size_mm": 35
   },
   "sensors": [
     {

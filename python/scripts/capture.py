@@ -11,6 +11,7 @@ import numpy as np
 from .io import sensor_image_directories, write_image, write_json
 from .sensor_capture.config import sensor_options
 from .sensor_capture.sources import create_frame_source, require_gui_support, disable_orbbec_logging
+from .sensor_capture.orbbec import configure_orbbec_gain
 from .sensor_intrinsics.core import create_object_points, prepare_gray8, utc_now_iso
 from .sensor_intrinsics.detection import detect_checkerboard_realtime, draw_subpixel_corners, preview_image
 
@@ -25,6 +26,7 @@ class OrbbecIRSource:
         self.original_settings = []
         self.profiles = {}
         self.info = {}
+        self.gain_info = {}
 
     def open(self):
         try:
@@ -64,8 +66,7 @@ class OrbbecIRSource:
             self.pipeline.enable_frame_sync()
         properties = sdk.OBPropertyID
         settings = [(properties.OB_PROP_IR_AUTO_EXPOSURE_BOOL, 'bool', False),
-                    (properties.OB_PROP_IR_EXPOSURE_INT, 'int', sensor['exposure_sdk']),
-                    (properties.OB_PROP_IR_GAIN_INT, 'int', sensor.get('gain_sdk', 16))]
+                    (properties.OB_PROP_IR_EXPOSURE_INT, 'int', sensor['exposure_sdk'])]
         laser_mode = sensor.get('laser_mode', 0)
         laser = getattr(properties, 'OB_PROP_LASER_CONTROL_INT', None)
         if laser is not None and device.is_property_supported(laser, sdk.OBPermissionType.PERMISSION_WRITE):
@@ -81,6 +82,8 @@ class OrbbecIRSource:
             actual = getattr(device, 'get_' + kind + '_property')(prop)
             if actual != value:
                 raise RuntimeError(f'IR setting readback mismatch: {prop}, requested={value}, actual={actual}')
+        self.gain_info = configure_orbbec_gain(device, sdk, 'ir', sensor.get('gain_sdk', 16),
+                                               self.original_settings)
         self.pipeline.start(config)
         self.started = True
         for _ in range(10):
@@ -130,7 +133,7 @@ class OrbbecIRSource:
     def metadata(self, label):
         profile = self.profiles[label]
         intrinsic, distortion = profile.get_intrinsic(), profile.get_distortion()
-        return {**self.info, 'backend': 'orbbec-ir',
+        return {**self.info, **self.gain_info, 'backend': 'orbbec-ir',
                 'image_size': [profile.get_width(), profile.get_height()],
                 'sdk_intrinsics': {'image_size': [profile.get_width(), profile.get_height()],
                                    'camera_matrix': [[intrinsic.fx, 0, intrinsic.cx], [0, intrinsic.fy, intrinsic.cy], [0, 0, 1]],

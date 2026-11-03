@@ -7,6 +7,7 @@ import math
 import re
 from pathlib import Path
 from typing import Any
+from ..sensor_capture.controls import normalize_controls
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -15,8 +16,8 @@ MODES = ("sensor_intrinsics", "sensor_extrinsics")
 _LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _PROFILE_KEYS = {
     "serial_number", "ip_address", "schema_version", "sensor_type", "sensor_index", "stream", "width", "height",
-    "acquisition_fps", "exposure_auto", "exposure_us", "exposure_sdk",
-    "gain_auto", "gain_db", "gain_sdk", "gamma_enabled", "offset_x", "offset_y",
+    "acquisition_fps", "exposure", "gain", "exposure_auto", "exposure_us", "exposure_sdk",
+    "gain_auto", "gain_db", "gain_sdk", "gain_feature", "gamma_enabled", "offset_x", "offset_y",
     "pixel_format", "laser_mode", "white_balance_mode", "white_balance_kelvin",
     "white_balance_warmup_frames", "galaxy_backend", "gxipy_path", "notes",
     "_comment", "_comments",
@@ -73,29 +74,38 @@ def _sensor(entry: Any, config_dir: Path) -> dict[str, Any]:
     if not isinstance(label, str) or not _LABEL.fullmatch(label):
         raise ValueError("Sensor label must start with an ASCII letter and use letters, digits, _ or - (max 64 characters)")
     profile_path = _resolve_path(entry.get("sensor_config"), config_dir, "sensor_config")
-    profile = _read_json(profile_path)
+    return validate_sensor_profile(_read_json(profile_path), profile_path, label)
+
+
+def validate_sensor_profile(profile, profile_path, label='camera'):
+    """Validate public or legacy profile fields without opening a camera."""
+    profile_path = Path(profile_path).resolve()
+    profile = dict(_object(profile, 'sensor profile'))
     _keys(profile, _PROFILE_KEYS, f"sensor profile {label}")
     if type(profile.get("schema_version")) is not int or profile["schema_version"] != 1:
         raise ValueError(f"Sensor profile {label} schema_version must be 1")
     sensor_type = profile.get("sensor_type")
     if sensor_type not in ("orbbec", "galaxy", "opencv", "vcamera"):
         raise ValueError(f"Sensor {label} sensor_type must be orbbec, galaxy, opencv or vcamera")
+    profile = normalize_controls(profile, label)
+    profile.setdefault("acquisition_fps", 30 if sensor_type == "orbbec" else 0)
     for selector in ("serial_number", "ip_address"):
         if selector in profile and (sensor_type != "vcamera" or not isinstance(profile[selector], str)):
             raise ValueError(f"{label}.{selector} must be a string and is only available for Vcamera")
+    if "gain_feature" in profile and sensor_type != "vcamera":
+        raise ValueError(f"{label}.gain_feature is only available for Vcamera")
     if sensor_type == "vcamera":
         allowed = {"schema_version", "sensor_type", "sensor_index", "stream", "width", "height",
-                   "serial_number", "ip_address", "acquisition_fps", "notes", "_comment", "_comments"}
+                   "serial_number", "ip_address", "acquisition_fps", "exposure_us", "gain_sdk", "gain_feature",
+                   "notes", "_comment", "_comments"}
         _keys(profile, allowed, f"Vcamera profile {label}")
-        if profile.get("stream") != "color":
-            raise ValueError(f"{label}: Vcamera currently supports raw color texture only")
         if profile.get("acquisition_fps", 0) != 0:
             raise ValueError(f"{label}: Vcamera acquisition_fps must be 0 (device continuous rate)")
     stream = profile.get("stream")
     if stream not in ("color", "gray", "ir_left", "ir_right"):
         raise ValueError(f"Sensor {label} stream must be color, gray, ir_left or ir_right")
-    if sensor_type != "orbbec" and stream.startswith("ir_"):
-        raise ValueError(f"Sensor {label}: named left/right IR streams require Orbbec SDK")
+    if sensor_type not in {"orbbec", "vcamera"} and stream.startswith("ir_"):
+        raise ValueError(f"Sensor {label}: named left/right IR streams require Orbbec or Vcamera SDK")
     if sensor_type == "orbbec" and stream == "gray":
         raise ValueError(f"Sensor {label}: select Orbbec color, ir_left or ir_right explicitly")
     if sensor_type == "galaxy" and stream != "gray":
@@ -118,12 +128,13 @@ def _sensor(entry: Any, config_dir: Path) -> dict[str, Any]:
         for key in ("gain_db", "offset_x", "offset_y", "galaxy_backend", "gxipy_path"):
             if key in profile:
                 raise ValueError(f"{label}.{key} is only available for Galaxy sensors")
+        if profile.get("gain_sdk") is not None:
+            _integer(profile["gain_sdk"], f"{label}.gain_sdk")
         if stream.startswith("ir_"):
             _integer(profile.get("exposure_sdk"), f"{label}.exposure_sdk", 1)
             for key in ("white_balance_mode", "white_balance_kelvin", "white_balance_warmup_frames"):
                 if key in profile:
                     raise ValueError(f"{label}: white balance applies only to the color stream")
-            _integer(profile.get("gain_sdk", 16), f"{label}.gain_sdk")
             profile.setdefault("gain_sdk", 16)
             _integer(profile.get("laser_mode", 0), f"{label}.laser_mode")
             if profile.get("laser_mode", 0) not in (0, 1, 2):
@@ -135,8 +146,8 @@ def _sensor(entry: Any, config_dir: Path) -> dict[str, Any]:
         else:
             if "pixel_format" in profile:
                 raise ValueError(f"{label}: color pixel format is negotiated by the SDK adapter; pixel_format is configurable for IR and Galaxy")
-            if any(key in profile for key in ("gain_sdk", "laser_mode")):
-                raise ValueError(f"{label}: gain_sdk and laser_mode belong to the IR streams")
+            if "laser_mode" in profile:
+                raise ValueError(f"{label}: laser_mode belongs to the IR streams")
             wb_mode = profile.get("white_balance_mode", "auto_lock")
             if wb_mode not in ("auto_lock", "auto", "manual"):
                 raise ValueError(f"{label}.white_balance_mode must be auto_lock, auto or manual")
@@ -166,9 +177,20 @@ def _sensor(entry: Any, config_dir: Path) -> dict[str, Any]:
             raise ValueError(f"{label}.galaxy_backend must be gxipy, ctypes or auto")
         if profile.get("gxipy_path") is not None:
             profile["gxipy_path"] = str(_resolve_path(profile["gxipy_path"], profile_path.parent, f"{label}.gxipy_path"))
+    elif sensor_type == "vcamera":
+        if profile.get("exposure_us") is not None:
+            _number(profile["exposure_us"], f"{label}.exposure_us", positive=True)
+        if profile.get("gain_sdk") is not None:
+            _number(profile["gain_sdk"], f"{label}.gain_sdk")
+        if profile.get("gain_feature") not in (None, "DigitalGain", "AnalogGain", "Gain"):
+            raise ValueError(f"{label}.gain_feature must be DigitalGain, AnalogGain or Gain")
     else:
-        unsupported = {"gain_sdk", "laser_mode", "gain_db", "offset_x", "offset_y", "pixel_format", "galaxy_backend", "gxipy_path", "white_balance_mode", "white_balance_kelvin", "white_balance_warmup_frames"}
-        if set(profile) & unsupported or profile.get("exposure_us") is not None or profile.get("exposure_sdk") is not None:
+        if profile.get("gain_sdk") is not None:
+            _number(profile["gain_sdk"], f"{label}.gain_sdk")
+        if profile.get("exposure_sdk") is not None:
+            _number(profile["exposure_sdk"], f"{label}.exposure_sdk", minimum=-math.inf)
+        unsupported = {"laser_mode", "gain_db", "offset_x", "offset_y", "pixel_format", "galaxy_backend", "gxipy_path", "white_balance_mode", "white_balance_kelvin", "white_balance_warmup_frames"}
+        if set(profile) & unsupported or profile.get("exposure_us") is not None:
             raise ValueError(f"{label}: OpenCV exposure controls are backend-specific; use the vendor SDK for controlled exposure")
     profile.update(label=label, sensor_config=str(profile_path))
     return profile
@@ -249,7 +271,7 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
             if fixed_path:
                 # Fail before opening devices if the selected model is missing,
                 # malformed, or belongs to another configured image resolution.
-                from ..validation.stereo import _camera
+                from ..stereo_calibration.verification import _camera
                 camera = _camera(Path(fixed_path))
                 size = (sensor["width"], sensor["height"])
                 if all(size) and camera["image_size"] != size:
