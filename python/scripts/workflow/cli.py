@@ -4,27 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ..session_storage import session_path, timestamp_directory
+from ..remote import add_target_arguments, run_workflow
 from .config import DEFAULT_CONFIG, PROJECT_ROOT, load_config
-
-
-def _timestamp_directory(parent: Path) -> Path:
-    parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(10):
-        destination = parent / datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S_%f")
-        try:
-            destination.mkdir()
-            return destination
-        except FileExistsError:
-            continue
-    raise RuntimeError(f"Could not allocate a timestamp directory under {parent}")
-
-
-def _session_path(value: Path) -> Path:
-    return (value if value.is_absolute() else PROJECT_ROOT / value).resolve()
 
 
 def _check_session_geometry(session: Path, config: dict) -> None:
@@ -51,46 +37,97 @@ def _check_session_geometry(session: Path, config: dict) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="通过配置选择传感器内参或外参标定；数据和结果自动保存在时间戳目录。")
-    parser.add_argument("command", nargs="?", default="run", choices=("run", "capture", "calibrate", "verify"),
-                        help="run=采集后标定；capture=只采集；calibrate=使用现有数据；verify=固定已有参数验证新图像")
+        epilog="Vcamera diagnostics: inspect-vcamera --help",
+        description="通过配置选择传感器内外参或靶标几何标定；数据和结果自动保存在时间戳目录。")
+    parser.add_argument("command", nargs="?", default="run", choices=("run", "capture", "calibrate", "verify", "detect"),
+                        help="run=采集后标定；capture=只采集；calibrate=使用现有数据；verify=传感器参数验证；detect=靶标角点识别")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                         help=f"标定配置 JSON，默认 {DEFAULT_CONFIG.relative_to(PROJECT_ROOT).as_posix()}")
     parser.add_argument("--session", type=Path,
-                        help="calibrate/verify 使用的数据目录；相对路径以工程根目录为基准")
+                        help="calibrate/verify/detect 使用的数据目录；相对路径以工程根目录为基准")
     parser.add_argument("--calibration-dir", type=Path,
                         help="verify 读取内参和外参 YAML 的结果目录")
+    add_target_arguments(parser, PROJECT_ROOT)
     return parser
 
 
 def main(argv=None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "inspect-vcamera":
+        from ..sensor_capture.vcamera import inspect_main
+
+        return inspect_main(arguments[1:])
+    if arguments and arguments[0] == "studio":
+        from .studio import main as studio_main
+
+        return studio_main(arguments[1:])
+    camera_only = bool(arguments and arguments[0] == "camera")
+    if camera_only:
+        arguments[0] = "capture"
+        if not any(arg == "--config" or arg.startswith("--config=") for arg in arguments):
+            arguments.extend(("--config", "configs/intrinsics/galaxy.json"))
+    if arguments and arguments[0] == "pivot":
+        from ..marker_calibration.pivot import main as pivot_main
+
+        return pivot_main(arguments[1:])
     parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.command in ("calibrate", "verify") and args.session is None:
+    args = parser.parse_args(arguments)
+    if args.command in ("calibrate", "verify", "detect") and args.session is None:
         parser.error(f"{args.command} requires --session <capture directory>")
-    if args.command not in ("calibrate", "verify") and args.session is not None:
-        parser.error("--session is only used by calibrate or verify")
     if args.command == "verify" and args.calibration_dir is None:
         parser.error("verify requires --calibration-dir <saved YAML directory>")
     if args.command != "verify" and args.calibration_dir is not None:
         parser.error("--calibration-dir is only used by verify")
+    if args.ssh:
+        try:
+            return run_workflow(args, PROJECT_ROOT)
+        except (ValueError, KeyError, TypeError, OSError, RuntimeError, ImportError) as error:
+            print(f"Error: {error}", file=sys.stderr)
+            return 1
+    if camera_only:
+        os.environ["CALIBRATION_CAPTURE_WEB"] = "1"
+        os.environ["CALIBRATION_CAPTURE_LOCAL_BROWSER"] = "1"
     try:
         import cv2
     except ImportError as error:
         print(f"Error: OpenCV is required: {error}", file=sys.stderr)
         return 1
     try:
+        configured = json.loads(session_path(args.config).read_text(encoding="utf-8-sig"))
+        if not isinstance(configured, dict):
+            raise ValueError("Workflow configuration must be a JSON object")
+        configured_mode = configured.get("mode")
+        if configured_mode == "marker_pivot":
+            from ..marker_calibration.pivot import run_configured
+
+            return run_configured(
+                args.command, session_path(args.config),
+                session_path(args.session) if args.session is not None else None,
+            )
+        if configured_mode == "marker_geometry":
+            if args.command == "verify":
+                raise ValueError("Marker geometry uses held-out validation during calibrate; verify is for sensor calibration")
+            from ..marker_calibration.cli import main as marker_main
+
+            marker_args = [args.command, "--config", str(args.config)]
+            if args.session is not None:
+                marker_args.extend(["--session", str(args.session)])
+            return marker_main(marker_args)
+        if args.command not in ("calibrate", "verify", "detect") and args.session is not None:
+            raise ValueError("Sensor --session is only used by calibrate or verify")
+        if args.command == "detect":
+            raise ValueError("detect requires a marker_geometry configuration")
         config = load_config(args.config)
         if args.command in ("calibrate", "verify"):
-            session = _session_path(args.session)
+            session = session_path(args.session)
             if not session.is_dir():
                 raise ValueError(f"Capture session does not exist: {session}")
             if not (session / "capture_metadata.json").is_file():
                 raise ValueError(f"No capture_metadata.json in {session}")
         else:
-            from ..capture import capture_session
+            from ..sensor_intrinsics.checkerboard_session import capture_session
 
-            session = _timestamp_directory(PROJECT_ROOT / "data")
+            session = timestamp_directory(PROJECT_ROOT / "data")
             print(f"Capture session: {session}")
             captured = capture_session(config, session)
             if isinstance(captured, int) and captured != 0:
@@ -105,14 +142,14 @@ def main(argv=None) -> int:
         if args.command == "verify":
             from ..stereo_calibration.verification import verify_session
 
-            calibration_dir = _session_path(args.calibration_dir)
+            calibration_dir = session_path(args.calibration_dir)
             print(f"Fixed calibration parameters: {calibration_dir}")
             print(f"Validation images: {session}; K/D/R/T are not refitted.")
             result = verify_session(session, calibration_dir, options, config["mode"])
         else:
-            from ..stereo_calibration.core import calibrate_session
+            from ..stereo_calibration.pairwise import calibrate_session
 
-            output = _timestamp_directory(PROJECT_ROOT / "output")
+            output = timestamp_directory(PROJECT_ROOT / "output")
             print(f"Calibration results: {output}")
             result = calibrate_session(session, output, options, config["mode"])
         passed = bool(result["passed"])

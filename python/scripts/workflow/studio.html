@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>相机标定工作台</title>
+<style>
+body { background: #15212c; color: #ecf2f7; font: 16px system-ui, sans-serif; margin: 20px; }
+[hidden] { display: none; }
+nav { display: flex; flex-wrap: wrap; gap: 8px; }
+button { padding: 8px 14px; }
+button[aria-pressed="true"] { background: #80caff; color: #10202e; }
+iframe { width: 100%; height: 76vh; border: 1px solid #567; }
+pre { max-height: 14rem; overflow: auto; white-space: pre-wrap; background: #101923; padding: 12px; }
+</style>
+<h1>相机标定工作台</h1>
+<nav aria-label="采集及标定模式">
+    <button data-mode="camera">相机拍摄</button>
+    <button data-mode="intrinsics">普通标定</button>
+    <button data-mode="stereo">双目标定</button>
+    <button data-mode="marker">Marker 标定</button>
+    <button data-mode="pivot">竖轴定位</button>
+    <button data-mode="imu">IMU 预览</button>
+</nav>
+<p id="status" role="status">请选择采集或标定模式。</p>
+<button id="stop" hidden>关闭 IMU 预览</button>
+<iframe id="workspace" title="当前采集或预览" hidden></iframe>
+<h2>任务日志</h2>
+<pre id="logs">等待开始任务。</pre>
+<script>
+const workspace = document.querySelector('#workspace');
+const buttons = [...document.querySelectorAll('[data-mode]')];
+const stop = document.querySelector('#stop');
+const logs = document.querySelector('#logs');
+const status = document.querySelector('#status');
+let busy = false, actionError = '';
+async function action(path) {
+    if (busy) return;
+    busy = true;
+    actionError = '';
+    buttons.forEach(button => button.disabled = true);
+    try {
+        const response = await fetch(path, {method: 'POST', signal: AbortSignal.timeout(5000)});
+        if (!response.ok) throw new Error((await response.json()).error);
+    } catch (error) {
+        actionError = error.message;
+    } finally {
+        busy = false;
+    }
+}
+buttons.forEach(button => button.onclick = () => action('/start/' + button.dataset.mode));
+stop.onclick = () => action('/stop');
+async function refresh() {
+    try {
+        const response = await fetch('/status', {cache: 'no-store', signal: AbortSignal.timeout(2500)});
+        const state = await response.json();
+        const active = buttons.find(button => button.dataset.mode === state.mode);
+        const name = active?.textContent;
+        buttons.forEach(button => {
+            button.disabled = busy || state.running;
+            button.setAttribute('aria-pressed', button === active && state.running ? 'true' : 'false');
+        });
+        stop.hidden = !(state.running && state.mode === 'imu');
+        if (state.url && workspace.getAttribute('src') !== state.url) workspace.src = state.url;
+        if (!state.url) workspace.removeAttribute('src');
+        workspace.hidden = !state.url;
+        status.textContent = actionError || (state.running
+            ? name + (state.url ? '运行中。' : '正在启动…')
+            : state.exit_code === null ? '请选择采集或标定模式。'
+            : name + (state.exit_code === 0 ? '已完成。' : '未完成，请查看任务日志。'));
+        const text = state.logs.join('\n');
+        if (text && logs.textContent !== text) {
+            const follow = logs.scrollHeight - logs.scrollTop - logs.clientHeight <= 8;
+            logs.textContent = text;
+            if (follow) logs.scrollTop = logs.scrollHeight;
+        }
+    } catch {
+        status.textContent = '暂时无法读取工作台状态。';
+    } finally {
+        setTimeout(refresh, 350);
+    }
+}
+refresh();
+</script>
+</html>

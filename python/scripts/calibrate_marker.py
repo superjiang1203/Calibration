@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Run instrument marker calibration using the selected workflow JSON."""
+
+import sys
+from pathlib import Path
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+sys.dont_write_bytecode = True
+
+from python.scripts.marker_calibration.cli import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

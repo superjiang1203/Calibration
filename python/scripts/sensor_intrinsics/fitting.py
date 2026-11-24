@@ -1,4 +1,4 @@
-"""Checkerboard measurements and numerical sensor intrinsic calibration.
+"""Numerical sensor intrinsic fitting and held-out validation.
 
 No camera SDK dependency; each image is measured independently, and held-out
 images validate a fitted model without refitting its intrinsic parameters.
@@ -7,15 +7,13 @@ images validate a fitted model without refitting its intrinsic parameters.
 from __future__ import annotations
 
 import math
-import os
-import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Sequence
 
 import cv2
 import numpy as np
+
+from .detection import create_object_points
 
 
 INTRINSIC_STD_NAMES = (
@@ -67,212 +65,6 @@ class CalibrationFit:
     per_view_errors: np.ndarray
     point_errors: list[np.ndarray]
     residual_vectors: list[np.ndarray]
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def commit_staged_files(
-    pairs: Sequence[tuple[Path, Path]], *, replace_existing: bool
-) -> None:
-    """Commit a related set of staged files with backup-based rollback."""
-
-    normalized = [(Path(source), Path(target)) for source, target in pairs]
-    target_keys = [str(target.resolve()).casefold() for _, target in normalized]
-    if len(target_keys) != len(set(target_keys)):
-        raise ValueError("staged file targets must be unique")
-    for source, target in normalized:
-        if not source.is_file():
-            raise FileNotFoundError(f"staged file is missing: {source}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-
-    token = uuid.uuid4().hex
-    backups: dict[Path, Path] = {}
-    committed: set[Path] = set()
-    try:
-        # Move every old target out of the way before publishing any new file.
-        for _, target in normalized:
-            if not target.exists():
-                continue
-            if not replace_existing:
-                raise FileExistsError(f"output already exists: {target}")
-            backup = target.with_name(f".{target.name}.{token}.backup")
-            os.replace(target, backup)
-            backups[target] = backup
-
-        for source, target in normalized:
-            os.replace(source, target)
-            committed.add(target)
-    except BaseException as exc:
-        rollback_errors: list[str] = []
-        for target in committed:
-            if target not in backups:
-                try:
-                    target.unlink(missing_ok=True)
-                except OSError as rollback_exc:
-                    rollback_errors.append(f"remove {target}: {rollback_exc}")
-        for target, backup in backups.items():
-            if not backup.exists():
-                continue
-            try:
-                os.replace(backup, target)
-            except OSError as rollback_exc:
-                rollback_errors.append(f"restore {target}: {rollback_exc}")
-        if rollback_errors:
-            raise RuntimeError(
-                "output commit failed and rollback was incomplete: "
-                + "; ".join(rollback_errors)
-            ) from exc
-        raise
-    else:
-        for backup in backups.values():
-            try:
-                backup.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-
-def prepare_gray8(image: np.ndarray) -> np.ndarray:
-    """Return an 8-bit grayscale image without changing its geometry.
-
-    OpenCV's checkerboard detectors require 8-bit input.  Mono10/12/16 input
-    is linearly mapped using robust endpoints; clipping only the outer 0.1%
-    avoids a handful of hot pixels destroying contrast.  The original image is
-    never modified and should still be retained for production use.
-    """
-
-    if image is None or image.size == 0:
-        raise ValueError("image is empty")
-    if image.ndim == 2:
-        gray = image
-    elif image.ndim == 3 and image.shape[2] == 1:
-        gray = image[:, :, 0]
-    elif image.ndim == 3 and image.shape[2] == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    elif image.ndim == 3 and image.shape[2] == 4:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
-    else:
-        raise ValueError(f"unsupported image shape: {image.shape}")
-
-    if gray.dtype == np.uint8:
-        return np.ascontiguousarray(gray)
-
-    finite = np.asarray(gray, dtype=np.float64)
-    valid = finite[np.isfinite(finite)]
-    if valid.size == 0:
-        raise ValueError("image has no finite pixels")
-    low, high = np.percentile(valid, (0.1, 99.9))
-    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
-        return np.zeros(gray.shape, dtype=np.uint8)
-    scaled = (finite - low) * (255.0 / (high - low))
-    scaled[~np.isfinite(scaled)] = 0.0
-    return np.ascontiguousarray(np.clip(scaled, 0, 255).astype(np.uint8))
-
-
-def image_quality(gray8: np.ndarray) -> dict[str, float]:
-    """Compute diagnostic (not universal pass/fail) image-quality metrics."""
-
-    if gray8.dtype != np.uint8 or gray8.ndim != 2:
-        raise ValueError("image_quality expects a uint8 grayscale image")
-    return {
-        "sharpness": float(cv2.Laplacian(gray8, cv2.CV_64F).var()),
-        "dark_fraction": float(np.mean(gray8 <= 2)),
-        "bright_fraction": float(np.mean(gray8 >= 253)),
-        "mean_gray": float(np.mean(gray8)),
-    }
-
-
-def create_object_points(
-    pattern_size: tuple[int, int], square_size: float
-) -> np.ndarray:
-    """Create planar points in row-major detector order.
-
-    ``pattern_size`` is ``(inner_columns, inner_rows)``.  ``square_size`` is
-    normally expressed in millimetres, which makes the resulting translations
-    use millimetres too.
-    """
-
-    columns, rows = (int(pattern_size[0]), int(pattern_size[1]))
-    if columns < 2 or rows < 2:
-        raise ValueError("checkerboard needs at least 2x2 inner corners")
-    if not np.isfinite(square_size) or square_size <= 0:
-        raise ValueError("square_size must be a positive finite number")
-    points = np.zeros((columns * rows, 3), dtype=np.float32)
-    points[:, :2] = np.mgrid[0:columns, 0:rows].T.reshape(-1, 2)
-    points[:, :2] *= float(square_size)
-    return points
-
-
-def refine_checkerboard_corners(gray8, corners, pattern_size):
-    """Refine within a local window sized for the actual square pitch."""
-    grid = np.asarray(corners, np.float32).reshape(pattern_size[1], pattern_size[0], 2)
-    horizontal = np.linalg.norm(np.diff(grid, axis=1), axis=2)
-    vertical = np.linalg.norm(np.diff(grid, axis=0), axis=2)
-    pitch = min(float(np.median(horizontal)), float(np.median(vertical)))
-    if not np.isfinite(pitch) or pitch < 4:
-        raise ValueError('Checkerboard square pitch is too small for subpixel refinement')
-    radius = max(2, min(11, int(np.floor(pitch * 0.5))))
-    return cv2.cornerSubPix(gray8, np.ascontiguousarray(corners, dtype=np.float32).copy(),
-        (radius, radius), (-1, -1),
-        (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 50, 1e-3))
-
-
-def detect_checkerboard(
-    gray8: np.ndarray,
-    pattern_size: tuple[int, int],
-    *,
-    detector: str = "auto",
-    exhaustive: bool = True,
-    fast_check: bool = False,
-) -> tuple[bool, np.ndarray | None, str]:
-    """Detect a complete checkerboard and return subpixel corner locations.
-
-    Auto uses classic detection plus subpixel refinement first, with SB as
-    fallback. On the tested Orbbec images this avoids SB's repeat variation
-    and reduces sensitivity to saturated white squares.
-    """
-
-    if gray8.dtype != np.uint8 or gray8.ndim != 2:
-        raise ValueError("detect_checkerboard expects a uint8 grayscale image")
-    if detector not in {"auto", "sb", "classic"}:
-        raise ValueError(f"unsupported detector: {detector}")
-
-    size = (int(pattern_size[0]), int(pattern_size[1]))
-    can_use_sb = hasattr(cv2, "findChessboardCornersSB")
-    if detector == "auto":
-        found, corners, used = detect_checkerboard(gray8, size, detector="classic",
-                                                  exhaustive=exhaustive, fast_check=True)
-        if found or not can_use_sb:
-            return found, corners, used
-        found, corners, used = detect_checkerboard(gray8, size, detector="sb",
-                                                  exhaustive=exhaustive, fast_check=fast_check)
-        return found, corners, used if found else "classic+sb"
-    if detector == "sb" and can_use_sb:
-        flags = cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_ACCURACY
-        if exhaustive:
-            flags |= cv2.CALIB_CB_EXHAUSTIVE
-        found, corners = cv2.findChessboardCornersSB(gray8, size, flags=flags)
-        if found:
-            return True, np.ascontiguousarray(corners, dtype=np.float32), "sb"
-        if detector == "sb":
-            return False, None, "sb"
-
-    flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
-    if fast_check:
-        # Live capture must reject a temporarily obscured or saturated board
-        # promptly. Without FAST_CHECK, the classic fallback can spend tens
-        # of seconds searching a high-resolution cluttered frame.
-        flags |= cv2.CALIB_CB_FAST_CHECK
-    found, corners = cv2.findChessboardCorners(gray8, size, flags=flags)
-    if not found:
-        used = "classic" if detector == "classic" or not can_use_sb else "sb+classic"
-        return False, None, used
-    try:
-        refined = refine_checkerboard_corners(gray8, corners, size)
-    except ValueError:
-        return False, None, "classic-small-pitch"
-    return True, np.ascontiguousarray(refined, dtype=np.float32), "classic"
 
 
 def _manual_residuals(

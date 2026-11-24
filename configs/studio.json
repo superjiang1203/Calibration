@@ -1,0 +1,11 @@
+{
+  "camera": "configs/intrinsics/galaxy.json",
+  "intrinsics": "configs/intrinsics/galaxy.json",
+  "stereo": "configs/extrinsics/galaxy_vcamera_color.json",
+  "marker": "configs/markers/double_cube.json",
+  "pivot": "configs/markers/pivot.json",
+  "imu": {
+    "geometry": "output/20261118_marker_C_planar_geometry/double_cube_geometry.yaml",
+    "intrinsics": "output/20261118_marker_C_planar_geometry/camera_intrinsics.yml"
+  }
+}

@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 
-from .base import FrameSource
+from .frame_source import FrameSource
 
 class OpenCVSource(FrameSource):
     backend_name = "opencv-video-capture"

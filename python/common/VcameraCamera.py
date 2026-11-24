@@ -12,8 +12,8 @@ read 返回所选通道的 BGR uint8 或单通道 uint8/uint16 ndarray，超时�
 stream: color/gray 选择 Texture，ir_left/ir_right 选择 Left/Right。
 gray 要求 Texture 本身输出灰度，不会将彩色图转换成灰度或自动切换镜头。
 宽高为 0 时选择最大可用模式；多设备建议通过 serial_number 选择。
-exposure_us 单位为微秒；None 保留设备设置，指定时关闭可用的自动曝光并设置所选通道。
-gain_sdk 使用设备原生单位，None 保留设置；增益节点由设备能力选择。
+exposure_us 单位为微秒；指定时手动曝光，未指定时默认启动自动曝光、稳定后锁定。
+gain_sdk 使用设备原生单位，None 不指定初值；auto_lock 模式将曝光和实际增益一起锁定。
 """
 import importlib
 import math
@@ -30,7 +30,7 @@ class VcameraCamera:
 
     def __init__(self, target_width=0, target_height=0, sensor_index=0,
                  serial_number='', ip_address='', stream='color', exposure_us=None,
-                 gain_sdk=None, gain_feature=None):
+                 gain_sdk=None, gain_feature=None, exposure_mode=None, exposure_warmup_frames=30):
         if sensor_index < 0 or target_width < 0 or target_height < 0:
             raise ValueError('Device index and image dimensions must be nonnegative')
         if stream not in self.stream_sensors:
@@ -45,10 +45,19 @@ class VcameraCamera:
             raise ValueError('Vcamera gain_sdk must be a finite nonnegative number or None')
         if gain_feature not in (None, 'DigitalGain', 'AnalogGain', 'Gain'):
             raise ValueError('Vcamera gain_feature must be DigitalGain, AnalogGain or Gain')
+        if exposure_mode is None:
+            exposure_mode = 'manual' if exposure_us is not None else 'auto_lock'
+        if exposure_mode not in ('manual', 'auto_lock', 'preserve'):
+            raise ValueError('Vcamera exposure_mode must be manual, auto_lock or preserve')
+        if (exposure_mode == 'manual') != (exposure_us is not None):
+            raise ValueError('Vcamera manual mode requires exposure_us; auto_lock/preserve require None')
+        if type(exposure_warmup_frames) is not int or not 5 <= exposure_warmup_frames <= 120:
+            raise ValueError('Vcamera exposure_warmup_frames must be an integer from 5 to 120')
         self.args = SimpleNamespace(width=target_width, height=target_height,
                                     sensor_index=sensor_index, serial_number=serial_number,
                                     ip_address=ip_address, stream=stream, exposure_us=exposure_us,
-                                    gain_sdk=gain_sdk, gain_feature=gain_feature)
+                                    gain_sdk=gain_sdk, gain_feature=gain_feature,
+                                    exposure_mode=exposure_mode, exposure_warmup_frames=exposure_warmup_frames)
         self.camera = None
         self.connected = False
         self.started = False
@@ -141,9 +150,14 @@ class VcameraCamera:
                                f'configure {name} sensor')
             self._configure_exposure()
             self._configure_gain()
+            self.info['exposure_mode'] = self.args.exposure_mode
+            if self.args.exposure_mode == 'auto_lock':
+                self._set_auto_control(f'{self.sensor_name}/ExposureAuto', True, required=True)
             self.camera.RegisterFrameSetCallback(self._callback)
             self.check(self.camera.StartCapture(), 'start capture')
             self.started = True
+            if self.args.exposure_mode == 'auto_lock':
+                self._warmup_and_lock_exposure()
         except Exception:
             self.close()
             raise
@@ -152,6 +166,9 @@ class VcameraCamera:
         requested = self.args.exposure_us
         if requested is None:
             return
+        self._set_exposure(requested)
+
+    def _set_exposure(self, requested):
         # ExposureTime is the SDK's microsecond API. IntExposureTime has native
         # device units and must never be used as a microsecond fallback.
         name = f'{self.sensor_name}/ExposureTime'
@@ -162,7 +179,7 @@ class VcameraCamera:
         limits, status = feature.GetFloatRange()
         self.check(status, f'query {name} range')
         low, high = float(limits.minValue), float(limits.maxValue)
-        if not (math.isfinite(low) and math.isfinite(high) and 0 < low <= high):
+        if not (math.isfinite(low) and math.isfinite(high) and 0 <= low <= high and high > 0):
             raise RuntimeError(f'Vcamera {name}: invalid exposure range {low}..{high} us')
         if not low <= requested <= high:
             raise ValueError(f'Vcamera {name}: exposure_us={requested:g} outside supported '
@@ -172,7 +189,7 @@ class VcameraCamera:
         value, status = feature.GetValue()
         self.check(status, f'read back {name}')
         actual = float(value)
-        if not math.isfinite(actual) or not low <= actual <= high:
+        if not math.isfinite(actual) or actual <= 0 or not low <= actual <= high:
             raise RuntimeError(f'Vcamera {name}: invalid exposure readback {actual} us')
         # Sensors can quantize the requested duration to integral line times.
         self.info.update(exposure_us=actual, requested_exposure_us=float(requested),
@@ -183,31 +200,101 @@ class VcameraCamera:
         print(f'Vcamera: exposure={actual:g} us')
 
     def _disable_auto_control(self, auto_name):
+        return self._set_auto_control(auto_name, False)
+
+    def _set_auto_control(self, auto_name, enabled, required=False):
         # This SDK reports FeatureInvalid for absent optional controls. Enumerate
         # features so absence is distinct from a failure reading an existing one.
         features, status = self.camera.GetAllFeatures()
         self.check(status, 'list automatic controls')
         auto = next((item for item in features if item.GetName() == auto_name), None)
         auto_supported = auto is not None
+        if required and not auto_supported:
+            raise RuntimeError(f'Vcamera {auto_name}: unavailable; configure a manual exposure instead')
         if auto_supported:
             if auto.GetType() == self.sdk.FeatureType.Bool:
-                off = False
+                requested = bool(enabled)
             elif auto.GetType() == self.sdk.FeatureType.Enumeration:
                 items, status = auto.GetEnumItems()
                 self.check(status, f'query {auto_name} values')
-                matches = [item for item in items if item.name.lower() in {'off', 'disabled'}]
+                names = ('continuous', 'on', 'enabled', 'auto') if enabled else ('off', 'disabled')
+                matches = [item for name in names for item in items if item.name.lower() == name]
                 if len(matches) != 1:
-                    raise RuntimeError(f'Vcamera {auto_name}: no unambiguous Off value')
-                off = matches[0].value
+                    # Continuous takes precedence when both On and Continuous are exposed.
+                    matches = [item for item in items if enabled and item.name.lower() == 'continuous']
+                if len(matches) != 1:
+                    raise RuntimeError(f'Vcamera {auto_name}: no unambiguous {"On" if enabled else "Off"} value')
+                requested = matches[0].value
             else:
                 raise RuntimeError(f'Vcamera {auto_name}: unsupported automatic control type')
-            self.check(auto.SetValue(off), f'disable {auto_name}')
+            self.check(auto.SetValue(requested), f'set {auto_name}')
             value, status = auto.GetValue()
             self.check(status, f'read back {auto_name}')
-            actual = bool(value) if off is False else int(value)
-            if actual != off:
-                raise RuntimeError(f'Vcamera {auto_name}: automatic control was not disabled')
+            actual = bool(value) if auto.GetType() == self.sdk.FeatureType.Bool else int(value)
+            if actual != requested:
+                raise RuntimeError(f'Vcamera {auto_name}: automatic control readback mismatch')
         return auto_supported
+
+    def _photometric_controls(self):
+        features, status = self.camera.GetAllFeatures()
+        self.check(status, 'list exposure/gain controls')
+        wanted = {f'{self.sensor_name}/{name}' for name in ('ExposureTime', 'DigitalGain', 'AnalogGain', 'Gain')}
+        return {feature.GetName(): feature for feature in features if feature.GetName() in wanted}
+
+    def _control_values(self, controls):
+        values = {}
+        for name, feature in controls.items():
+            value, status = feature.GetValue()
+            self.check(status, f'read {name}')
+            integer = feature.GetType() == self.sdk.FeatureType.Int64
+            native = int(value) if integer else float(value)
+            number = float(native)
+            if not math.isfinite(number) or number < 0 or (name.endswith('/ExposureTime') and number <= 0):
+                raise RuntimeError(f'Vcamera {name}: invalid control value {number}')
+            values[name] = native
+        return values
+
+    def _warmup_and_lock_exposure(self):
+        controls = self._photometric_controls()
+        exposure_name = f'{self.sensor_name}/ExposureTime'
+        if exposure_name not in controls:
+            raise RuntimeError(f'Vcamera {exposure_name}: cannot read automatic exposure in microseconds')
+        previous, stable = None, 0
+        print('Vcamera: automatic exposure warmup; keep the calibration scene in view.', flush=True)
+        for count in range(1, 121):
+            if self.read(1500) is None:
+                raise RuntimeError('Vcamera: no frame during automatic exposure warmup')
+            values = self._control_values(controls)
+            settled = previous is not None and all(
+                math.isclose(values[name], previous[name], rel_tol=0.01, abs_tol=1e-6) for name in values)
+            stable = stable + 1 if settled else 0
+            previous = values
+            if count >= self.args.exposure_warmup_frames and stable >= 6:
+                break
+        else:
+            raise RuntimeError('Vcamera: exposure/gain did not stabilize in 120 frames; improve illumination or use manual exposure')
+        self._set_auto_control(f'{self.sensor_name}/ExposureAuto', False, required=True)
+        gain_auto = self._disable_auto_control(f'{self.sensor_name}/GainAuto')
+        locked = self._control_values(controls)
+        self._set_exposure(locked[exposure_name])
+        for name, feature in controls.items():
+            if name != exposure_name:
+                self.check(feature.SetValue(locked[name]), f'lock {name}')
+        # Discard automatic-exposure frames already queued in the device/SDK and
+        # verify the fixed control values before returning any calibration frame.
+        verified = self._control_values(controls)
+        for _ in range(5):
+            if self.read(1500) is None:
+                raise RuntimeError('Vcamera: no frame after locking exposure')
+            actual = self._control_values(controls)
+            if any(not math.isclose(actual[name], verified[name], rel_tol=1e-6, abs_tol=1e-6) for name in actual):
+                raise RuntimeError('Vcamera: exposure/gain changed after disabling automatic controls')
+        self.info.update(exposure_auto=False, exposure_lock_verified=True,
+                         exposure_warmup_frame_count=count, locked_controls=verified,
+                         gain_auto_control_available=gain_auto)
+        if gain_auto:
+            self.info['gain_auto'] = False
+        print(f'Vcamera: exposure/gain locked after {count} frames: {verified}', flush=True)
 
     def _configure_gain(self):
         requested = self.args.gain_sdk
@@ -280,6 +367,8 @@ class VcameraCamera:
             if frame.shape != shape or frame.dtype != dtype:
                 raise RuntimeError(f'Unexpected Vcamera {self.sensor_name} image: {frame.shape}, {frame.dtype}')
             self.info['pixel_format'] = pixel_format
+            if hasattr(image, 'laser_val'):
+                self.info['last_frame_laser_value'] = int(image.laser_val())
         except Exception as exc:
             frame = exc
         try:

@@ -1,6 +1,7 @@
 # Local captures and calibration results
 /data/
 /output/
+/configs/ssh.local.json
 
 # Keep only packaged SDKs and their documentation
 /thirdparty/*

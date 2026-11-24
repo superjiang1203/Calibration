@@ -5,10 +5,11 @@
   "stream": "color",
   "width": 0,
   "height": 0,
-  "exposure": null,
-  "gain": null,
+  "exposure": 30000,
+  "exposure_warmup_frames": 30,
+  "gain": 1,
   "_comments": {
-    "exposure": "曝光时间，单位微秒。",
-    "gain": "增益使用设备原生单位；null 保留设备设置。"
+    "exposure": "曝光时间，单位微秒；null 启动自动曝光，稳定后锁定；填写数值则直接使用手动曝光，例如 10000 表示 10 ms。",
+    "gain": "增益使用设备原生单位；自动曝光模式下随曝光稳定后一起锁定。"
   }
 }

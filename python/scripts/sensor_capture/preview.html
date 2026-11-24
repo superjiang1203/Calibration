@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>远程标定采集</title>
+<style>
+body { font: 16px system-ui, sans-serif; background: #15212c; color: #ecf2f7; margin: 24px; }
+button { padding: 8px 16px; margin-right: 8px; }
+img { display: block; margin-top: 16px; max-width: 100%; max-height: 75vh; }
+[hidden] { display: none; }
+#cameraLog { max-height: 15rem; overflow: auto; background: #101923; padding: 12px; white-space: pre-wrap; }
+#cameraControls label { display: inline-block; margin: 8px 14px 8px 0; }
+</style>
+<h1>远程标定采集</h1>
+<button id="connect">连接相机</button>
+<button id="disconnect" disabled>断开相机</button>
+<span id="cameraState" role="status">已断开</span>
+<div id="cameraControls"></div>
+<button id="save" disabled>采集一组（空格）</button>
+<button id="record" disabled>开始连拍</button>
+<button id="nextGroup" hidden disabled>下一组（N）</button>
+<button id="finish">结束采集</button>
+<p id="status" role="status">点击「连接相机」开始预览。</p>
+<img id="preview" alt="标定相机预览" hidden>
+<h2>相机日志</h2>
+<pre id="cameraLog" tabindex="0">等待连接相机…</pre>
+<script>
+const preview = document.querySelector('#preview');
+const info = document.querySelector('#status');
+const save = document.querySelector('#save');
+const record = document.querySelector('#record');
+const nextGroup = document.querySelector('#nextGroup');
+const finish = document.querySelector('#finish');
+const connect = document.querySelector('#connect');
+const disconnect = document.querySelector('#disconnect');
+const log = document.querySelector('#cameraLog');
+const cameraControls = document.querySelector('#cameraControls');
+const stateLabel = document.querySelector('#cameraState');
+let busy = false, done = false, recording = false;
+let controlSignature = '';
+const inputs = new Map();
+async function control(action, payload) {
+    if (busy || done || (action === 'save' && save.disabled)) return;
+    busy = true;
+    try {
+        const response = await fetch('/' + action, {
+            method: 'POST', signal: AbortSignal.timeout(4000),
+            ...(payload && {headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)})
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        done = action === 'finish';
+        if (action === 'connect' || action === 'disconnect' || action === 'settings' || action === 'group/next') {
+            info.textContent = '请求已提交，处理结果见相机日志。';
+            return;
+        }
+        if (action === 'record/start' || action === 'record/stop') {
+            recording = action === 'record/start';
+            record.textContent = recording ? '停止连拍' : '开始连拍';
+            info.textContent = recording ? '连拍中，约每 1.25 秒保存一组原图。' : '已停止连拍，可继续单拍。';
+        } else {
+            info.textContent = done ? '正在结束采集。请在终端查看结果。' : '已请求采集。保存结果见终端和画面计数。';
+        }
+    } catch (error) {
+        info.textContent = '请求失败：' + error.message;
+    } finally {
+        busy = false;
+        if (done) save.disabled = record.disabled = nextGroup.disabled = finish.disabled = connect.disabled = disconnect.disabled = true;
+    }
+}
+save.onclick = () => control('save');
+record.onclick = () => control(recording ? 'record/stop' : 'record/start');
+nextGroup.onclick = () => control('group/next');
+finish.onclick = () => control('finish');
+connect.onclick = () => control('connect');
+disconnect.onclick = () => control('disconnect');
+document.addEventListener('keydown', event => {
+    if (event.code === 'KeyN' && !event.repeat && !nextGroup.disabled && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) {
+        control('group/next');
+    }
+    if (event.code === 'Space' && !event.repeat && !['BUTTON', 'INPUT'].includes(document.activeElement?.tagName)) {
+        event.preventDefault();
+        control('save');
+    }
+});
+preview.onload = () => {
+    preview.hidden = false;
+};
+preview.onerror = () => {
+    preview.hidden = true;
+};
+function renderControls(settings, connected) {
+    const signature = JSON.stringify(Object.entries(settings).map(([label, values]) => [label, Object.keys(values)]));
+    if (signature !== controlSignature) {
+        controlSignature = signature;
+        cameraControls.replaceChildren();
+        inputs.clear();
+        for (const [label, values] of Object.entries(settings)) {
+            for (const field of Object.keys(values)) {
+                const wrapper = document.createElement('label');
+                const input = document.createElement('input');
+                input.type = 'number';
+                wrapper.append(label + (field === 'exposure_us' ? ' 曝光（µs） ' : ' 增益（dB） '), input);
+                input.onchange = () => {
+                    if (input.value !== '' && input.reportValidity()) control('settings', {label, field, value: input.valueAsNumber});
+                };
+                input.onkeydown = event => { if (event.key === 'Enter') input.blur(); };
+                cameraControls.append(wrapper);
+                inputs.set(JSON.stringify([label, field]), input);
+            }
+        }
+    }
+    for (const [key, input] of inputs) {
+        const [label, field] = JSON.parse(key);
+        const range = settings[label][field];
+        input.min = range.min;
+        input.max = range.max;
+        input.step = 'any';
+        if (document.activeElement !== input) input.value = range.cur;
+    }
+    if (!inputs.size) cameraControls.textContent = connected ? '当前相机后端未提供实时曝光和增益调节。' : '';
+}
+async function refresh() {
+    if (done) return;
+    try {
+        const response = await fetch('/status', {cache: 'no-store', signal: AbortSignal.timeout(3000)});
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const state = await response.json();
+        nextGroup.hidden = !state.group;
+        nextGroup.disabled = !state.group?.ready;
+        record.hidden = Boolean(state.group);
+        save.textContent = state.group ? '保存一张（空格）' : '采集一组（空格）';
+        const connected = state.state === 'connected';
+        stateLabel.textContent = ({disconnected:'已断开', connecting:'正在连接', connected:'已连接', disconnecting:'正在断开', failed:'连接失败'})[state.state];
+        connect.disabled = connected || state.state === 'connecting' || state.state === 'disconnecting';
+        disconnect.disabled = !connected;
+        recording = state.recording;
+        save.disabled = !state.has_frame;
+        record.disabled = !state.has_frame;
+        record.textContent = recording ? '停止连拍' : '开始连拍';
+        renderControls(state.controls, connected);
+        const lines = state.logs.map(entry => new Date(entry.time * 1000).toLocaleTimeString() + ' ' + entry.message).join('\n');
+        if (lines && lines !== log.textContent) {
+            const follow = log.scrollHeight - log.scrollTop - log.clientHeight <= 8;
+            log.textContent = lines;
+            if (follow) log.scrollTop = log.scrollHeight;
+        }
+        if (state.has_frame) {
+            const url = '/frame.jpg?rev=' + state.frame_revision;
+            if (preview.getAttribute('src') !== url) preview.src = url;
+        }
+        else {
+            preview.hidden = true;
+            preview.removeAttribute('src');
+        }
+    } catch {
+        stateLabel.textContent = '暂时无法读取采集状态';
+        save.disabled = record.disabled = true;
+        preview.hidden = true;
+    } finally {
+        if (!done) setTimeout(refresh, 250);
+    }
+}
+refresh();
+</script>
+</html>

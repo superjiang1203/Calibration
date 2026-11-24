@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import importlib.util
 import math
 import os
@@ -15,7 +16,7 @@ import cv2
 import numpy as np
 
 
-from .base import FrameSource
+from .frame_source import FrameSource
 
 def disable_orbbec_logging(sdk):
     """Keep SDK file logs out of the calibration workspace; exceptions still propagate."""
@@ -197,3 +198,161 @@ class OrbbecSensorSource(FrameSource):
         if self.camera is not None:
             self.camera.close()
             self.camera = None
+
+
+class OrbbecIRSource:
+    """One SDK pipeline for one or both IR streams of the same device."""
+
+    def __init__(self, sensors):
+        self.sensors = sensors
+        self.sdk = self.device = self.pipeline = None
+        self.started = False
+        self.original_settings = []
+        self.profiles = {}
+        self.info = {}
+        self.gain_info = {}
+
+    def open(self):
+        try:
+            self._open()
+        except Exception as error:
+            if type(error).__module__.startswith('pyorbbecsdk'):
+                raise RuntimeError(f'Orbbec IR SDK open failed: {error}') from error
+            raise
+
+    def _open(self):
+        try:
+            import pyorbbecsdk as sdk
+        except ImportError as error:
+            raise RuntimeError(
+                f'Orbbec SDK import failed: {error}. '
+                'Install with this Python: python -m python.scripts.install_sdks orbbec'
+            ) from error
+        self.sdk = sdk
+        disable_orbbec_logging(sdk)
+        sensor = self.sensors[0]
+        self.context = sdk.Context()
+        devices = self.context.query_devices()
+        index = sensor['sensor_index']
+        if not 0 <= index < devices.get_count():
+            raise RuntimeError('No Orbbec device at configured sensor_index')
+        self.device = device = devices.get_device_by_index(index)
+        self.pipeline = sdk.Pipeline(device)
+        config = sdk.Config()
+        for item in self.sensors:
+            kind = sdk.OBSensorType.LEFT_IR_SENSOR if item['stream'] == 'ir_left' else sdk.OBSensorType.RIGHT_IR_SENSOR
+            profile = self.pipeline.get_stream_profile_list(kind).get_video_stream_profile(
+                item['width'], item['height'], getattr(sdk.OBFormat, item['pixel_format']), int(item['acquisition_fps']))
+            config.enable_stream(profile)
+            self.profiles[item['label']] = profile
+        if len(self.sensors) == 2:
+            config.set_frame_aggregate_output_mode(sdk.OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE)
+            self.pipeline.enable_frame_sync()
+        properties = sdk.OBPropertyID
+        settings = [(properties.OB_PROP_IR_AUTO_EXPOSURE_BOOL, 'bool', False),
+                    (properties.OB_PROP_IR_EXPOSURE_INT, 'int', sensor['exposure_sdk'])]
+        laser_mode = sensor.get('laser_mode', 0)
+        laser = getattr(properties, 'OB_PROP_LASER_CONTROL_INT', None)
+        if laser is not None and device.is_property_supported(laser, sdk.OBPermissionType.PERMISSION_WRITE):
+            settings.append((laser, 'int', laser_mode))
+        elif laser_mode in (0, 1):
+            settings.append((properties.OB_PROP_LASER_BOOL, 'bool', bool(laser_mode)))
+        else:
+            raise ValueError('Device does not support automatic laser mode')
+        for prop, kind, value in settings:
+            previous = getattr(device, 'get_' + kind + '_property')(prop)
+            self.original_settings.append((prop, kind, previous))
+            getattr(device, 'set_' + kind + '_property')(prop, value)
+            actual = getattr(device, 'get_' + kind + '_property')(prop)
+            if actual != value:
+                raise RuntimeError(f'IR setting readback mismatch: {prop}, requested={value}, actual={actual}')
+        self.gain_info = configure_orbbec_gain(device, sdk, 'ir', sensor.get('gain_sdk', 16),
+                                               self.original_settings)
+        self.pipeline.start(config)
+        self.started = True
+        for _ in range(10):
+            self.pipeline.wait_for_frames(1000)
+        version = 'unknown'
+        for name in ('pyorbbecsdk2', 'pyorbbecsdk'):
+            try:
+                version = importlib.metadata.version(name)
+                break
+            except importlib.metadata.PackageNotFoundError:
+                continue
+        self.info = {'device_serial': device.get_device_info().get_serial_number(),
+                     'sdk_python_version': version,
+                     'image_geometry': 'native SDK stream; no application D2C, undistortion or rectification; firmware processing unverified'}
+
+    def read(self, timeout_ms):
+        try:
+            return self._read(timeout_ms)
+        except Exception as error:
+            if type(error).__module__.startswith('pyorbbecsdk'):
+                raise RuntimeError(f'Orbbec IR SDK read failed: {error}') from error
+            raise
+
+    def _read(self, timeout_ms):
+        frames = self.pipeline.wait_for_frames(timeout_ms)
+        if frames is None:
+            return {}, {}
+        images, timestamps = {}, {}
+        for sensor in self.sensors:
+            frame = frames.get_left_ir_frame() if sensor['stream'] == 'ir_left' else frames.get_right_ir_frame()
+            if frame is None:
+                continue
+            fmt = frame.get_format()
+            if fmt not in (self.sdk.OBFormat.Y8, self.sdk.OBFormat.Y16):
+                raise ValueError('IR stream must return uncompressed Y8/Y16')
+            dtype = np.uint8 if fmt == self.sdk.OBFormat.Y8 else np.uint16
+            data = np.frombuffer(frame.get_data(), dtype=dtype)
+            width, height = frame.get_width(), frame.get_height()
+            if data.size != width * height:
+                raise ValueError('Unsupported padded/compressed IR image')
+            label = sensor['label']
+            images[label] = data.reshape(height, width).copy()
+            timestamps[label] = int(frame.get_timestamp_us())
+            self.profiles[label] = frame.get_stream_profile().as_video_stream_profile()
+        return images, timestamps
+
+    def metadata(self, label):
+        profile = self.profiles[label]
+        intrinsic, distortion = profile.get_intrinsic(), profile.get_distortion()
+        return {**self.info, **self.gain_info, 'backend': 'orbbec-ir',
+                'image_size': [profile.get_width(), profile.get_height()],
+                'sdk_intrinsics': {'image_size': [profile.get_width(), profile.get_height()],
+                                   'camera_matrix': [[intrinsic.fx, 0, intrinsic.cx], [0, intrinsic.fy, intrinsic.cy], [0, 0, 1]],
+                                   'distortion_coefficients': [float(getattr(distortion, key)) for key in ('k1', 'k2', 'p1', 'p2', 'k3', 'k4', 'k5', 'k6')],
+                                   'sdk_distortion_model': str(getattr(distortion, 'model', 'UNAVAILABLE'))}}
+
+    def sdk_pair_metadata(self):
+        if len(self.sensors) != 2:
+            return {}
+        by_stream = {sensor['stream']: sensor['label'] for sensor in self.sensors}
+        lp, rp = self.profiles[by_stream['ir_left']], self.profiles[by_stream['ir_right']]
+        extrinsic = lp.get_extrinsic_to(rp)
+        translation = np.asarray(extrinsic.transform if hasattr(extrinsic, 'transform') else extrinsic.trans, np.float64).reshape(3)
+        rotation = np.asarray(extrinsic.rot, np.float64).reshape(3, 3)
+        transform = np.eye(4)
+        transform[:3, :3], transform[:3, 3] = rotation, translation
+        baseline = float(np.linalg.norm(translation))
+        if not np.isfinite(transform).all() or not 1 < baseline < 500:
+            raise ValueError('Invalid SDK reference IR extrinsics')
+        return {'sdk_baseline_mm': baseline, 'sdk_transform_ir_left_to_ir_right': transform.tolist(),
+                'sdk_reference_source_label': by_stream['ir_left'], 'sdk_reference_target_label': by_stream['ir_right']}
+
+    def close(self):
+        try:
+            if self.started:
+                self.pipeline.stop()
+                self.started = False
+        finally:
+            if self.device is not None:
+                failures = []
+                for prop, kind, value in reversed(self.original_settings):
+                    try:
+                        getattr(self.device, 'set_' + kind + '_property')(prop, value)
+                    except Exception as error:
+                        failures.append(str(error))
+                self.original_settings.clear()
+                if failures:
+                    raise RuntimeError('Could not restore original IR settings: ' + '; '.join(failures))

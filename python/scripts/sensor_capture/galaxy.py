@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 
-from .base import FrameSource
+from .frame_source import FrameSource
 
 def _align_int(value: int, value_range: dict[str, Any]) -> int:
     minimum = int(value_range.get("min", 0))
@@ -92,9 +92,10 @@ class GxipyGalaxySource(FrameSource):
         offset_x: int | None,
         offset_y: int | None,
         exposure_us: float | None,
-        gain_db: float,
+        gain_db: float | None,
         acquisition_fps: float,
         gxipy_path: str | None,
+        serial: str | None = None,
     ) -> None:
         self.sensor_index = int(sensor_index)
         self.requested_width = int(width)
@@ -102,7 +103,8 @@ class GxipyGalaxySource(FrameSource):
         self.requested_offset_x = offset_x
         self.requested_offset_y = offset_y
         self.exposure_us = None if exposure_us is None else float(exposure_us)
-        self.gain_db = float(gain_db)
+        self.gain_db = None if gain_db is None else float(gain_db)
+        self.serial = serial
         self.acquisition_fps = float(acquisition_fps)
         self.gxipy_path = gxipy_path
         self.gx = None
@@ -210,7 +212,8 @@ class GxipyGalaxySource(FrameSource):
                     "calibration requires False"
                 )
         require_float("ExposureTime", self.exposure_us, positive=True)
-        require_float("Gain", self.gain_db)
+        if self.gain_db is not None:
+            require_float("Gain", self.gain_db)
         expected_fps_mode = "On" if self.acquisition_fps > 0 else "Off"
         require_enum(
             "AcquisitionFrameRateMode", expected_fps_mode, optional=True
@@ -385,6 +388,10 @@ class GxipyGalaxySource(FrameSource):
         # User indices refer to Daheng devices, not the mixed SDK device list.
         galaxy_devices = [info for info in device_infos
                           if 'daheng' in str(info.get('vendor_name', '')).casefold()]
+        if self.serial:
+            galaxy_devices = [info for info in galaxy_devices if str(info.get("sn", "")) == self.serial]
+            if not galaxy_devices:
+                raise RuntimeError(f"Galaxy SDK did not find camera serial {self.serial}")
         if not galaxy_devices:
             raise RuntimeError("Galaxy SDK found no Daheng camera; discovered vendors: "
                                + ', '.join(str(info.get('vendor_name', 'unknown')) for info in device_infos))
@@ -406,7 +413,8 @@ class GxipyGalaxySource(FrameSource):
             self._set_roi()
             if self.exposure_us is not None:
                 self._set_float_if_writable("ExposureTime", self.exposure_us)
-            self._set_float_if_writable("Gain", self.gain_db)
+            if self.gain_db is not None:
+                self._set_float_if_writable("Gain", self.gain_db)
             if self.acquisition_fps > 0:
                 self._set_enum_if_writable("AcquisitionFrameRateMode", "On")
                 self._set_float_if_writable(
@@ -479,6 +487,37 @@ class GxipyGalaxySource(FrameSource):
             }
         except Exception:
             return None
+
+    def live_settings(self):
+        from .galaxy_controls import CAMERA_SETTINGS
+
+        settings = {}
+        for key, (feature, _, _) in CAMERA_SETTINGS.items():
+            limits = self._read_float_range(feature)
+            value = self._read_feature("float", feature)
+            if limits and value is not None:
+                settings[key] = dict(limits, cur=float(value))
+        return settings
+
+    def set_live_setting(self, key, value):
+        from .galaxy_controls import CAMERA_SETTINGS, validate_setting
+
+        feature, auto, _ = CAMERA_SETTINGS[key]
+        validate_setting(feature, self.live_settings()[key], value)
+        if self._read_feature("enum", auto) in (None, "Off") and self._is_writable(feature):
+            try:
+                self._floating(feature).set(value)
+                return
+            except Exception:
+                pass
+        self.camera.stream_off()
+        self._streaming = False
+        try:
+            self._set_enum_if_writable(auto, "Off")
+            self._floating(feature).set(value)
+        finally:
+            self.camera.stream_on()
+            self._streaming = True
 
     def _read_int_range(self, name: str) -> dict[str, Any] | None:
         if not self._is_implemented(name):
@@ -564,6 +603,16 @@ class GxipyGalaxySource(FrameSource):
 
 class CtypesGalaxySource(FrameSource):
     """Workspace's libgxiapi.so ctypes backend for Linux/WSL deployments."""
+
+    def live_settings(self):
+        from .galaxy_controls import camera_settings
+
+        return camera_settings(self.camera)
+
+    def set_live_setting(self, key, value):
+        from .galaxy_controls import apply_camera_setting
+
+        apply_camera_setting(self.camera, key, value)
 
     backend_name = "galaxy-ctypes"
 

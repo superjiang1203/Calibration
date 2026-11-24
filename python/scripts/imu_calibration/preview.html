@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Marker 几何与 IMU 姿态实时对比</title>
+<style>
+body{background:#111b25;color:#e2edf4;font:15px/1.5 system-ui,"Microsoft YaHei",sans-serif;margin:20px}h1{font-size:24px}img{max-width:100%;max-height:72vh;object-fit:contain;background:#080e15}main{display:grid;grid-template-columns:minmax(500px,1.4fr) minmax(380px,1fr);gap:18px}pre{white-space:pre-wrap;font-size:13px;color:#9ed1d7}button,select{padding:8px 12px;margin:4px}small{color:#a4bcc9}.panel{background:#192735;padding:14px;border-radius:10px;margin-bottom:16px}.warn{color:#ffd58b}canvas{width:100%;max-width:440px;background:#101923;border-radius:8px}@media(max-width:950px){main{display:block}}
+.cameraView{position:relative;display:inline-block;max-width:100%}.cameraView img{display:block}.cameraView canvas{position:absolute;left:0;top:0;max-width:none;border-radius:0;background:transparent;pointer-events:none}</style>
+<h1>导航棒几何与 IMU 姿态实时对比</h1>
+<p>视觉：实线 20 mm；IMU：虚线 35 mm（I-X / I-Y / I-Z）。两套轴均以 ID84 的标定原点为起点。X 红、Y 绿、Z 蓝。</p>
+<main><section><div class="panel"><div class="cameraView"><img id="cameraImage" src="/stream" alt="实时相机"><canvas id="cameraImu"></canvas></div>
+<p><button id="connectCamera" onclick="cameraCommand('/start')">连接相机</button><button id="disconnectCamera" onclick="cameraCommand('/stop')" disabled>断开相机</button> <span id="cameraState"></span></p>
+<p id="cameraCommandStatus" role="status"></p>
+<p id="previewConnectionStatus" class="warn" role="status" hidden></p>
+<p><label>曝光（µs） <input type="number" id="exposure_us" step="any" disabled onchange="setCamera(this)" onkeydown="applyOnEnter(event)"></label>
+<label>增益 <input type="number" id="gain" step="any" disabled onchange="setCamera(this)" onkeydown="applyOnEnter(event)"></label>
+<span id="settingStatus" role="status"></span></p>
+<small>输入数值后按 Enter 或移出输入框应用。断开相机后仍可查看右侧 IMU。</small>
+<h3>相机日志</h3><pre id="cameraLog" tabindex="0" style="max-height:16rem;overflow:auto;background:#101923;padding:10px">等待连接相机…</pre></div>
+<div class="panel"><h3>导航棒角点与原点放大</h3><div class="cameraView"><img id="zoomImage" src="/zoom" alt="标定原点放大"><canvas id="zoomImu"></canvas></div><p>绿：检测角点；红：几何投影；黄：残差。至少三个码时轮流留出一个完整码验证。</p></div></section>
+<section><div class="panel"><h3>IMU 原始姿态（独立参考系）</h3><canvas id="attitude" width="440" height="280"></canvas>
+<p><select id="source" onchange="command('/imu/reset',{source:this.value})"><option value="icm42670">ICM42670 EKF</option><option value="jy931">JY931</option></select>
+<button onclick="command('/imu/align')">将当前 IMU 姿态对齐视觉轴</button><button onclick="command('/imu/reset')">恢复原始姿态</button></p>
+<p id="rate">测量实际姿态更新频率…</p><p class="warn" id="mode">等待 IMU 数据</p><p id="imuText"></p>
+<small>原始四元数按 WXYZ、主动旋转显示。欧拉角约定 R = Rz(yaw) Ry(pitch) Rx(roll)。单次对齐只让当前两套轴重合，假设安装轴一致；它不是安装外参标定，不能据此判断绝对姿态精度。相机和 IMU 未做硬件同步。IMU 数据超过 500 ms 会隐藏叠加轴。</small></div>
+<div class="panel"><h3>实时状态</h3><p id="message"></p><pre id="state">正在连接…</pre></div></section></main>
+<script>
+let changingSetting = false;
+let cameraCommandPending = false;
+let acquisitionRequested = false;
+
+function updateCameraControls() {
+    document.getElementById('connectCamera').disabled = cameraCommandPending || acquisitionRequested;
+    document.getElementById('disconnectCamera').disabled = cameraCommandPending || !acquisitionRequested;
+}
+
+async function cameraCommand(path) {
+    if (cameraCommandPending) return;
+    const feedback = document.getElementById('cameraCommandStatus');
+    cameraCommandPending = true;
+    updateCameraControls();
+    feedback.textContent = path === '/start' ? '正在发送连接请求…' : '正在发送断开请求…';
+    try {
+        const response = await fetch(path, {method: 'POST', signal: AbortSignal.timeout(5000)});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        acquisitionRequested = result.acquisition_requested;
+        feedback.textContent = '服务已收到请求，处理进度见下方相机日志。';
+    } catch (error) {
+        feedback.textContent = error.name === 'TimeoutError'
+            ? '等待服务确认超时。请查看相机日志是否已收到请求。'
+            : `相机请求失败：${error.message}`;
+    } finally {
+        cameraCommandPending = false;
+        updateCameraControls();
+    }
+}
+function applyOnEnter(event) {
+    if (event.key === 'Enter') event.currentTarget.blur();
+}
+const cameraStates = {
+    paused: '已断开',
+    pausing: '正在断开',
+    opening_camera: '正在连接',
+    camera_unavailable: '连接失败，正在重试',
+    tracking: '已连接',
+    searching_markers: '已连接，正在识别 marker'
+};
+
+function showCameraSettings(settings) {
+    for (const key of ['exposure_us', 'gain']) {
+        const input = document.getElementById(key),
+            setting = settings[key];
+        input.disabled = !setting;
+        if (!setting) {
+            input.value = '';
+            continue
+        }
+        input.min = setting.min;
+        input.max = setting.max;
+        input.title = `${setting.min}–${setting.max} ${setting.unit}`;
+        if (document.activeElement !== input) input.value = setting.cur;
+    }
+}
+async function setCamera(input) {
+    if (changingSetting || input.value === '') return;
+    changingSetting = true;
+    const message = document.getElementById('settingStatus');
+    message.textContent = '正在应用…';
+    try {
+        const response = await fetch('/camera/settings', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                setting: input.id,
+                value: input.valueAsNumber
+            })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error);
+        input.value = result.camera_settings[input.id].cur;
+        showCameraSettings(result.camera_settings);
+        message.textContent = '已应用';
+    } catch (error) {
+        message.textContent = error.message
+    } finally {
+        changingSetting = false
+    }
+}
+async function command(path, body = {}) {
+    try {
+        let r = await fetch(path, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+        });
+        let s = await r.json();
+        document.querySelector('#message').textContent = r.ok ? '操作完成' : s.error
+    } catch (e) {
+        document.querySelector('#message').textContent = String(e)
+    }
+}
+
+function widget(sample) {
+    let c = document.querySelector('#attitude'),
+        g = c.getContext('2d');
+    g.clearRect(0, 0, c.width, c.height);
+    g.fillStyle = '#9fb3c8';
+    g.font = '14px sans-serif';
+    g.fillText('IMU 原始参考系 · 与相机坐标系尚未标定', 16, 25);
+    if (!sample?.fresh) {
+        g.fillText('无新鲜有效姿态数据', 130, 145);
+        return
+    }
+    let r = sample.matrix,
+        origin = [220, 165],
+        scale = 85;
+    // Oblique projection only for inspecting the raw 3D orientation, not a camera projection.
+    const project = v => [origin[0] + scale * (.85 * v[0] + .5 * v[1]), origin[1] + scale * (.3 * v[0] - .5 * v[1] - .85 * v[2])];
+    ['#ff655f', '#69ed8a', '#69a9ff'].forEach((color, i) => {
+        let p = project([r[0][i], r[1][i], r[2][i]]);
+        g.strokeStyle = color;
+        g.fillStyle = color;
+        g.lineWidth = 3;
+        g.beginPath();
+        g.moveTo(...origin);
+        g.lineTo(...p);
+        g.stroke();
+        g.beginPath();
+        g.arc(...p, 4, 0, Math.PI * 2);
+        g.fill();
+        g.fillText(['X', 'Y', 'Z'][i], p[0] + 7, p[1] + 3)
+    });
+    g.fillStyle = '#fff';
+    g.beginPath();
+    g.arc(...origin, 4, 0, Math.PI * 2);
+    g.fill()
+}
+let busy = false;
+let statusFailures = 0;
+function showCameraLog(entries) {
+    const log = document.getElementById('cameraLog');
+    const content = entries.map(entry =>
+        new Date(entry.time * 1000).toLocaleTimeString() + ' ' + entry.message
+    ).join('\n');
+    if (!content || log.textContent === content) return;
+    const follow = log.scrollHeight - log.scrollTop - log.clientHeight <= 8;
+    log.textContent = content;
+    if (follow) log.scrollTop = log.scrollHeight;
+}
+setInterval(async () => {
+    if (busy || document.hidden) return;
+    busy = true;
+    const connectionStatus = document.getElementById('previewConnectionStatus');
+    try {
+        const response = await fetch('/status', {
+            cache: 'no-store',
+            signal: AbortSignal.timeout(3000)
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const s = await response.json();
+        statusFailures = 0;
+        connectionStatus.hidden = true;
+        const imu = s.imu || {};
+        showCameraLog(s.camera_logs || []);
+        document.getElementById('cameraState').textContent = cameraStates[s.state] || s.state;
+        if (!cameraCommandPending) {
+            acquisitionRequested = s.acquisition_requested;
+            updateCameraControls();
+        }
+        if (!changingSetting) showCameraSettings(s.camera_settings || {});
+        let compact = {
+            ...s
+        };
+        delete compact.imu;
+        delete compact.camera_logs;
+        compact.imu_connected = imu.connected;
+        compact.imu_samples = imu.received_samples;
+        compact.imu_sources = Object.keys(imu.sources || {});
+        compact.jy931_status = imu.jy931_status;
+        document.querySelector('#state').textContent = JSON.stringify(compact, null, 2)
+    } catch (error) {
+        if (++statusFailures >= 2) {
+            connectionStatus.textContent = '暂时无法读取相机状态，正在重试…';
+            connectionStatus.hidden = false;
+        }
+    } finally {
+        busy = false
+    }
+}, 500);
+
+
+// IMU overlay is drawn independently of camera JPEG cadence. No interpolation.
+function cameraAxes(imu) {
+    const anchor = imu.visual_anchor,
+        r = imu.display_matrix;
+    for (let [imageId, canvasId, zoom] of [
+            ['cameraImage', 'cameraImu', false],
+            ['zoomImage', 'zoomImu', true]
+        ]) {
+        let image = document.getElementById(imageId),
+            canvas = document.getElementById(canvasId),
+            g = canvas.getContext('2d');
+        if (!image.naturalWidth) continue;
+        if (canvas.width !== image.naturalWidth || canvas.height !== image.naturalHeight) {
+            canvas.width = image.naturalWidth;
+            canvas.height = image.naturalHeight
+        }
+        canvas.style.width = image.getBoundingClientRect().width + 'px';
+        canvas.style.height = image.getBoundingClientRect().height + 'px';
+        g.clearRect(0, 0, canvas.width, canvas.height);
+        if (!anchor || !r || !imu.connected || !imu.selected?.fresh) continue;
+        let k = anchor.camera_matrix,
+            d = anchor.distortion_coefficients,
+            t = anchor.translation_mm,
+            zp = anchor.zoom_projection;
+        if (d.length !== 5 || (zoom && !zp)) continue;
+
+        function project(v) {
+            let p = t.map((a, i) => a + r[i].reduce((sum, x, j) => sum + x * v[j], 0));
+            if (p[2] <= 1) return null;
+            let x = p[0] / p[2],
+                y = p[1] / p[2],
+                rr = x * x + y * y,
+                radial = 1 + d[0] * rr + d[1] * rr * rr + d[4] * rr * rr * rr;
+            let xd = x * radial + 2 * d[2] * x * y + d[3] * (rr + 2 * x * x),
+                yd = y * radial + d[2] * (rr + 2 * y * y) + 2 * d[3] * x * y;
+            let u = k[0][0] * xd + k[0][2],
+                v2 = k[1][1] * yd + k[1][2];
+            return zoom ? [(u - zp.offset_px[0]) * zp.scale, (v2 - zp.offset_px[1]) * zp.scale] : [u * anchor.full_projection_scale, v2 * anchor.full_projection_scale]
+        }
+        let origin = project([0, 0, 0]);
+        if (!origin) continue;
+        ['#ff503c', '#50ff50', '#3c82ff'].forEach((color, i) => {
+            let v = [0, 0, 0];
+            v[i] = 35;
+            let end = project(v);
+            if (!end) return;
+            g.strokeStyle = color;
+            g.fillStyle = color;
+            g.lineWidth = 2;
+            g.setLineDash([8, 5]);
+            g.beginPath();
+            g.moveTo(...origin);
+            g.lineTo(...end);
+            g.stroke();
+            g.setLineDash([]);
+            g.font = '15px sans-serif';
+            g.fillText(['I-X', 'I-Y', 'I-Z'][i], ...end)
+        })
+    }
+}
+
+let imuTicks = [],
+    lastImuTimestamp = null,
+    lastImuText = 0;
+
+function updateImu(imu) {
+    let p = imu.selected;
+    cameraAxes(imu);
+    widget(imu.connected ? p : null);
+    document.querySelector('#mode').textContent = imu.display_mode === 'single_pose_alignment' ? '单次姿态显示对齐 · 未完成安装外参标定' : '原始 IMU 姿态 · 尚未与相机配准';
+    document.querySelector('#imuText').textContent = p ? `${imu.source} | ${p.fresh&&imu.connected?'有效':'过期 / 无效'} | 样本年龄 ${p.sample_age_ms} ms\nWXYZ: ${p.quaternion_wxyz.map(v=>v.toFixed(5)).join(', ')}\nRoll / Pitch / Yaw: ${p.roll_pitch_yaw_deg.map(v=>v.toFixed(2)+'°').join(' / ')}` : '尚未收到所选 IMU 数据';
+    document.querySelector('#imuText').style.whiteSpace = 'pre-line';
+    if (p && p.fresh && p.device_timestamp_ms !== lastImuTimestamp) {
+        lastImuTimestamp = p.device_timestamp_ms;
+        imuTicks.push(performance.now());
+        if (imuTicks.length > 100) imuTicks.shift()
+    }
+    let now = performance.now();
+    if (now - lastImuText > 300) {
+        lastImuText = now;
+        let hz = imuTicks.length > 1 && p?.fresh ? (imuTicks.length - 1) * 1000 / (imuTicks.at(-1) - imuTicks[0]) : 0;
+        document.querySelector('#rate').textContent = `SDK 接收 ${(p?.sdk_receive_hz||0).toFixed(1)} Hz | 服务接收 ${(p?.server_receive_hz||0).toFixed(1)} Hz | 页面新姿态 ${hz.toFixed(1)} Hz`
+    }
+}
+let imuEvents;
+function updateStreams() {
+    for (const [id, path] of [['cameraImage', '/stream'], ['zoomImage', '/zoom']]) {
+        const img = document.getElementById(id);
+        if (document.hidden) img.removeAttribute('src');
+        else if (!img.hasAttribute('src')) img.src = path;
+    }
+    if (document.hidden) {
+        imuEvents?.close();
+        imuEvents = null;
+    } else if (!imuEvents) {
+        imuEvents = new EventSource('/imu/stream');
+        imuEvents.onmessage = event => updateImu(JSON.parse(event.data));
+        imuEvents.onerror = () => {
+            document.querySelector('#rate').textContent = 'IMU 推送连接中断，正在重连…';
+        };
+    }
+}
+document.addEventListener('visibilitychange', updateStreams);
+updateStreams();
+</script></html>

@@ -7,10 +7,10 @@ import math
 import re
 from pathlib import Path
 from typing import Any
-from ..sensor_capture.controls import normalize_controls
+from ..sensor_capture.camera_options import normalize_controls
+from ..session_storage import PROJECT_ROOT
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "extrinsics" / "galaxy_vcamera_color.json"
 MODES = ("sensor_intrinsics", "sensor_extrinsics")
 _LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
@@ -20,7 +20,7 @@ _PROFILE_KEYS = {
     "gain_auto", "gain_db", "gain_sdk", "gain_feature", "gamma_enabled", "offset_x", "offset_y",
     "pixel_format", "laser_mode", "white_balance_mode", "white_balance_kelvin",
     "white_balance_warmup_frames", "galaxy_backend", "gxipy_path", "notes",
-    "_comment", "_comments",
+    "_comment", "_comments", "exposure_mode", "exposure_warmup_frames",
 }
 
 
@@ -94,10 +94,12 @@ def validate_sensor_profile(profile, profile_path, label='camera'):
             raise ValueError(f"{label}.{selector} must be a string and is only available for Vcamera")
     if "gain_feature" in profile and sensor_type != "vcamera":
         raise ValueError(f"{label}.gain_feature is only available for Vcamera")
+    if sensor_type != "vcamera" and any(key in profile for key in ("exposure_mode", "exposure_warmup_frames")):
+        raise ValueError(f"{label}: exposure_mode/exposure_warmup_frames apply only to Vcamera")
     if sensor_type == "vcamera":
         allowed = {"schema_version", "sensor_type", "sensor_index", "stream", "width", "height",
                    "serial_number", "ip_address", "acquisition_fps", "exposure_us", "gain_sdk", "gain_feature",
-                   "notes", "_comment", "_comments"}
+                   "notes", "_comment", "_comments", "exposure_mode", "exposure_warmup_frames"}
         _keys(profile, allowed, f"Vcamera profile {label}")
         if profile.get("acquisition_fps", 0) != 0:
             raise ValueError(f"{label}: Vcamera acquisition_fps must be 0 (device continuous rate)")
@@ -178,6 +180,15 @@ def validate_sensor_profile(profile, profile_path, label='camera'):
         if profile.get("gxipy_path") is not None:
             profile["gxipy_path"] = str(_resolve_path(profile["gxipy_path"], profile_path.parent, f"{label}.gxipy_path"))
     elif sensor_type == "vcamera":
+        mode = profile.get('exposure_mode') or ('manual' if profile.get('exposure_us') is not None else 'auto_lock')
+        if mode not in ('manual', 'auto_lock', 'preserve'):
+            raise ValueError(f'{label}.exposure_mode must be manual, auto_lock or preserve')
+        if (mode == 'manual') != (profile.get('exposure_us') is not None):
+            raise ValueError(f'{label}: manual mode requires exposure; auto_lock/preserve require null exposure')
+        warmup = _integer(profile.get('exposure_warmup_frames', 30), f'{label}.exposure_warmup_frames', 5)
+        if warmup > 120:
+            raise ValueError(f'{label}.exposure_warmup_frames must be <= 120')
+        profile.update(exposure_mode=mode, exposure_warmup_frames=warmup)
         if profile.get("exposure_us") is not None:
             _number(profile["exposure_us"], f"{label}.exposure_us", positive=True)
         if profile.get("gain_sdk") is not None:

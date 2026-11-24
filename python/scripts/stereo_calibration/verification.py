@@ -5,8 +5,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ..sensor_intrinsics.core import verify_observations
-from .core import _detect_image, _image_path, _load_manifest, _options, _select_order, _summary
+from ..sensor_intrinsics.fitting import verify_observations
+from .pairwise import _detect_image, _image_path, _load_manifest, _options, _select_order, _summary
 
 
 def _read_yaml(path, keys):

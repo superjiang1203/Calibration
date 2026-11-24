@@ -1,0 +1,12 @@
+{
+  "hosts": {
+    "camera-lab": {
+      "host": "192.168.1.33",
+      "port": 22,
+      "user": "xxxxxx",
+      "password": null,
+      "project_dir": "/data2/cpp_project/Calibration",
+      "python": "/home/cair/miniconda3/envs/mod_camera_v2/bin/python"
+    }
+  }
+}

@@ -1078,9 +1078,10 @@ class GalaxyCamera:
             "unit": val.szUnit.decode("utf-8", errors="replace") if val.szUnit else "",
         }
 
-    def set_float(self, feature_name, value):
-        """Set a float-type feature value."""
-        self._check_stream_off("set_float")
+    def set_float(self, feature_name, value, *, live=False):
+        """Set a float feature, optionally while acquiring exposure or gain."""
+        if not live or feature_name not in ("ExposureTime", "Gain"):
+            self._check_stream_off("set_float")
         status = self._dll.GXSetFloatValue(self._handle, self._encode(feature_name), c_double(value))
         self._check_status(status, f"GXSetFloatValue({feature_name})")
 

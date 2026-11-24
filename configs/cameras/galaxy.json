@@ -5,8 +5,8 @@
   "stream": "gray",
   "width": 4504,
   "height": 4504,
-  "exposure": 50000.0,
-  "gain": 0.0,
+  "exposure": 30000.0,
+  "gain": 20.0,
   "_comments": {
     "exposure": "曝光时间，单位微秒。",
     "gain": "增益，单位 dB。"
