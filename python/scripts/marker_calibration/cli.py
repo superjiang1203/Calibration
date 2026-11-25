@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import cv2
 from ..session_storage import session_path, timestamp_directory, write_json
 from ..remote import add_target_arguments, run_workflow
 from ..workflow.config import PROJECT_ROOT
-from .marker_io import DEFAULT_CONFIG, detect_session, load_camera, load_config, save_geometry
+from .marker_io import DEFAULT_CONFIG, detect_session, load_camera, load_config, save_geometry, select_capture_camera
 
 
 def build_parser():
@@ -20,6 +21,8 @@ def build_parser():
     parser.add_argument('command', nargs='?', default='run', choices=('run', 'capture', 'detect', 'calibrate'))
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG, help='运行配置 JSON')
     parser.add_argument('--session', type=Path, help='detect/calibrate 读取图像；run/capture 续采现有靶标会话')
+    parser.add_argument('--camera', choices=('galaxy', 'vcamera'))
+    parser.add_argument('--camera-intrinsics', type=Path)
     add_target_arguments(parser, PROJECT_ROOT)
     return parser
 
@@ -29,11 +32,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command in ('detect', 'calibrate') and args.session is None:
         parser.error('--session is required for detect/calibrate')
+    if (args.camera_intrinsics and args.camera != 'galaxy') or (args.camera and args.command not in ('run', 'capture')):
+        parser.error('--camera-intrinsics applies only to Galaxy capture')
     output = None
     try:
         if args.ssh:
             return run_workflow(args, PROJECT_ROOT, marker=True)
         config = load_config(args.config)
+        select_capture_camera(config, args.camera, args.camera_intrinsics)
         marker = config['marker']
         model = marker['geometry_model']
         length = marker.get('reference_marker_length_mm')
@@ -44,7 +50,8 @@ def main(argv=None):
             from .marker_session import capture_session
 
             session = session_path(args.session) if args.session is not None else timestamp_directory(PROJECT_ROOT / 'data')
-            camera = load_camera(session / 'camera_params.yml' if args.session is not None else config['camera_parameters'])
+            camera_path = session / 'camera_params.yml' if args.session is not None else config['camera_parameters']
+            camera = load_camera(camera_path) if camera_path and (config['camera_parameters'] is not None or camera_path.is_file()) else None
             print(f'Capture session: {session}', flush=True)
             if board:
                 print(f'Group 1: show top ID {marker["reference_marker_id"]} and a side ID. '
@@ -68,7 +75,13 @@ def main(argv=None):
                 if metadata.get('marker', {}).get('dictionary') != config['marker']['dictionary']:
                     raise ValueError('Configured dictionary differs from the captured marker dictionary')
                 if board and 'capture_group' in metadata and args.command != 'detect' and not metadata.get('capture_complete'):
+                    if args.command == 'run' and os.environ.get('CALIBRATION_EMBEDDED') == '1':
+                        print('CALIBRATION_MARKER_PHASE=paused', flush=True)
+                        print(f'Partial capture saved. Resume session: {session}', flush=True)
+                        return 0
                     raise ValueError('Grouped capture is incomplete. Resume this session and follow the coverage prompts.')
+        if args.command != 'detect' and os.environ.get('CALIBRATION_EMBEDDED') == '1':
+            print('CALIBRATION_MARKER_PHASE=solve', flush=True)
         camera = load_camera(camera_path)
         output = timestamp_directory(PROJECT_ROOT / 'output')
         write_json(output / 'marker_workflow.json', {

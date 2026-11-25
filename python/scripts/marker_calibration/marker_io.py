@@ -36,13 +36,17 @@ def load_config(path):
         raise ValueError('Unknown marker workflow keys')
     if config.get('schema_version') != 2 or config.get('mode') != 'marker_geometry':
         raise ValueError('Expected schema_version 2 and mode marker_geometry')
-    for key in ('sensor_config', 'camera_parameters'):
+    def resolve_config_path(key):
         if not isinstance(config.get(key), str) or not config[key].strip():
             raise ValueError(f'{key} must be a path string')
         value = Path(config[key])
-        config[key] = (value if value.is_absolute() else path.parent / value).resolve()
-    profile_path = config['sensor_config']
+        return (value if value.is_absolute() else path.parent / value).resolve()
+
+    profile_path = config['sensor_config'] = resolve_config_path('sensor_config')
     config['sensor'] = validate_sensor_profile(json.loads(profile_path.read_text(encoding='utf-8-sig')), profile_path, 'marker_camera')
+    config['camera_parameters'] = (
+        None if config['sensor']['sensor_type'] == 'vcamera' else resolve_config_path('camera_parameters')
+    )
     marker = config['marker']
     if set(marker) - {'dictionary', 'expected_count', 'ids', 'reference_marker_id', 'reference_marker_length_mm', 'length_source', 'geometry_model', 'checkerboard'}:
         raise ValueError('Unknown marker settings')
@@ -117,6 +121,19 @@ def load_config(path):
         raise ValueError('tip_offset must contain three finite values')
     config['calibration'], config['_config_path'] = options, path
     return config
+
+
+def select_capture_camera(config, vendor, intrinsics):
+    if vendor is not None:
+        name = {"galaxy": "galaxy.json", "vcamera": "vcamera_color.json"}[vendor]
+        profile = PROJECT_ROOT / "configs/cameras" / name
+        config["sensor"] = validate_sensor_profile(json.loads(profile.read_text(encoding="utf-8-sig")), profile, "marker_camera")
+    if config["sensor"]["sensor_type"] == "vcamera":
+        config["camera_parameters"] = None
+    elif intrinsics is not None:
+        config["camera_parameters"] = (PROJECT_ROOT / intrinsics).resolve()
+    elif config["camera_parameters"] is None:
+        raise ValueError("使用 Galaxy 时需要对应的内参 YAML。")
 
 
 def load_camera(path):

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 from ..session_storage import session_path, timestamp_directory
 from ..remote import add_target_arguments, run_workflow
-from .config import DEFAULT_CONFIG, PROJECT_ROOT, load_config
+from .config import DEFAULT_CONFIG, PROJECT_ROOT, load_config, load_preview_config
 
 
 def _check_session_geometry(session: Path, config: dict) -> None:
@@ -47,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="calibrate/verify/detect 使用的数据目录；相对路径以工程根目录为基准")
     parser.add_argument("--calibration-dir", type=Path,
                         help="verify 读取内参和外参 YAML 的结果目录")
+    parser.add_argument("--camera", choices=("galaxy", "vcamera"), help="Marker 或竖轴采集使用的相机")
+    parser.add_argument("--camera-intrinsics", type=Path, help="所选相机的内参 YAML")
     add_target_arguments(parser, PROJECT_ROOT)
     return parser
 
@@ -54,18 +55,25 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == "inspect-vcamera":
+        target = argparse.ArgumentParser(add_help=False)
+        add_target_arguments(target, PROJECT_ROOT)
+        location, inspect_args = target.parse_known_args(arguments[1:])
+        if location.ssh:
+            from ..remote import run_calibration
+
+            try:
+                return run_calibration(location, PROJECT_ROOT, ["inspect-vcamera", *inspect_args],
+                                       script="calibrate.py")
+            except (ValueError, KeyError, TypeError, OSError, RuntimeError, ImportError) as error:
+                print(f"Error: {error}", file=sys.stderr)
+                return 1
         from ..sensor_capture.vcamera import inspect_main
 
-        return inspect_main(arguments[1:])
+        return inspect_main(inspect_args)
     if arguments and arguments[0] == "studio":
         from .studio import main as studio_main
 
         return studio_main(arguments[1:])
-    camera_only = bool(arguments and arguments[0] == "camera")
-    if camera_only:
-        arguments[0] = "capture"
-        if not any(arg == "--config" or arg.startswith("--config=") for arg in arguments):
-            arguments.extend(("--config", "configs/intrinsics/galaxy.json"))
     if arguments and arguments[0] == "pivot":
         from ..marker_calibration.pivot import main as pivot_main
 
@@ -78,31 +86,34 @@ def main(argv=None) -> int:
         parser.error("verify requires --calibration-dir <saved YAML directory>")
     if args.command != "verify" and args.calibration_dir is not None:
         parser.error("--calibration-dir is only used by verify")
+    if (args.camera_intrinsics and args.camera != "galaxy") or (args.camera and args.command not in ("run", "capture")):
+        parser.error("--camera-intrinsics applies only to Galaxy capture")
     if args.ssh:
         try:
             return run_workflow(args, PROJECT_ROOT)
         except (ValueError, KeyError, TypeError, OSError, RuntimeError, ImportError) as error:
             print(f"Error: {error}", file=sys.stderr)
             return 1
-    if camera_only:
-        os.environ["CALIBRATION_CAPTURE_WEB"] = "1"
-        os.environ["CALIBRATION_CAPTURE_LOCAL_BROWSER"] = "1"
     try:
         import cv2
     except ImportError as error:
         print(f"Error: OpenCV is required: {error}", file=sys.stderr)
         return 1
     try:
-        configured = json.loads(session_path(args.config).read_text(encoding="utf-8-sig"))
+        config_path = session_path(args.config)
+        configured = json.loads(config_path.read_text(encoding="utf-8-sig"))
         if not isinstance(configured, dict):
             raise ValueError("Workflow configuration must be a JSON object")
         configured_mode = configured.get("mode")
+        if args.camera and configured_mode not in ("marker_geometry", "marker_pivot"):
+            raise ValueError("相机切换用于 Marker 几何和竖轴采集。其他标定使用任务配置的传感器组合。")
         if configured_mode == "marker_pivot":
             from ..marker_calibration.pivot import run_configured
 
             return run_configured(
                 args.command, session_path(args.config),
                 session_path(args.session) if args.session is not None else None,
+                camera_vendor=args.camera, camera_intrinsics=args.camera_intrinsics,
             )
         if configured_mode == "marker_geometry":
             if args.command == "verify":
@@ -112,12 +123,17 @@ def main(argv=None) -> int:
             marker_args = [args.command, "--config", str(args.config)]
             if args.session is not None:
                 marker_args.extend(["--session", str(args.session)])
+            if args.camera:
+                marker_args.extend(["--camera", args.camera])
+            if args.camera_intrinsics:
+                marker_args.extend(["--camera-intrinsics", str(args.camera_intrinsics)])
             return marker_main(marker_args)
         if args.command not in ("calibrate", "verify", "detect") and args.session is not None:
             raise ValueError("Sensor --session is only used by calibrate or verify")
         if args.command == "detect":
             raise ValueError("detect requires a marker_geometry configuration")
-        config = load_config(args.config)
+        direct_preview = args.command == "capture" and "sensor_type" in configured
+        config = load_preview_config(config_path, configured) if direct_preview else load_config(config_path)
         if args.command in ("calibrate", "verify"):
             session = session_path(args.session)
             if not session.is_dir():
@@ -134,8 +150,11 @@ def main(argv=None) -> int:
                 return captured
             if args.command == "capture":
                 print(f"Saved capture session: {session}")
-                print(f'Calibrate this session: python python/scripts/calibrate.py calibrate --session "{session}" --config "{config["_config_path"]}"')
                 return 0
+            if config["mode"] == "sensor_extrinsics":
+                metadata = json.loads((session / "capture_metadata.json").read_text(encoding="utf-8"))
+                if not metadata.get("pairs"):
+                    raise ValueError("双目外参标定需要双路成对图像。本次没有保存有效双目配对。")
         _check_session_geometry(session, config)
         options = dict(config["calibration"], max_pair_delta_ms=config["capture"]["max_pair_delta_ms"])
         output = None

@@ -4,12 +4,13 @@ import json
 import os
 import sys
 import time
-import webbrowser
 from collections import deque
+from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
+from urllib.parse import parse_qs, urlsplit
 
 import cv2
 
@@ -27,7 +28,7 @@ class CaptureView:
     def __init__(self):
         self.web = os.environ.get("CALIBRATION_CAPTURE_WEB") == "1"
         self.images = {}
-        self.jpeg = None
+        self.frames = {}
         self.published = 0.0
         self.save = Event()
         self.record = Event()
@@ -41,6 +42,16 @@ class CaptureView:
         self.logs = deque(maxlen=60)
         self.state = "disconnected"
         self.controls = {}
+        self.title = "相机采集"
+        self.device_states = {}
+        self.pair_ready = None
+        self.required_frames = 1
+        self.camera_slots = []
+        self.settings_pending = False
+        self.connection_pending = False
+
+    def can_save(self):
+        return len(self.frames) >= self.required_frames and self.pair_ready is not False
 
     def log(self, message):
         with self.lock:
@@ -53,6 +64,7 @@ class CaptureView:
             return self
 
         page = Path(__file__).with_name("preview.html").read_bytes()
+        zoom_script = Path(__file__).with_name("image_zoom.js").read_bytes()
         view = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -62,8 +74,13 @@ class CaptureView:
             def do_GET(self):
                 if self.path == "/":
                     content, kind = page, "text/html; charset=utf-8"
+                elif self.path == "/image_zoom.js":
+                    content, kind = zoom_script, "text/javascript; charset=utf-8"
                 elif self.path.partition("?")[0] == "/frame.jpg":
-                    content, kind = view.jpeg, "image/jpeg"
+                    name = parse_qs(urlsplit(self.path).query).get("camera", [None])[0]
+                    frames = view.frames
+                    content = frames.get(name) if name is not None else next(iter(frames.values()), None)
+                    kind = "image/jpeg"
                 elif self.path == "/status":
                     with view.lock:
                         status = dict(
@@ -71,10 +88,20 @@ class CaptureView:
                             logs=list(view.logs),
                             controls=view.controls,
                             recording=view.record.is_set(),
-                            has_frame=view.jpeg is not None,
+                            has_frame=bool(view.frames),
+                            cameras=list(view.frames),
+                            camera_slots=view.camera_slots,
+                            frame_revision=view.published,
                             group=view.group_status,
+                            title=view.title,
+                            devices=dict(view.device_states),
+                            can_save=view.can_save(),
+                            settings_pending=view.settings_pending,
+                            camera_active=view.connection_pending or (
+                                any(value in ("connected", "connecting", "disconnecting") for value in view.device_states.values())
+                                if view.device_states else view.state in ("connected", "connecting", "disconnecting")
+                            ),
                         )
-                    status["frame_revision"] = view.published
                     content, kind = json.dumps(status).encode(), "application/json"
                 else:
                     self.send_error(404)
@@ -87,17 +114,44 @@ class CaptureView:
                     self.wfile.write(content)
 
             def do_POST(self):
+                if view.settings_pending:
+                    self.send_error(409, "Waiting for camera setting readback")
+                    return
                 if self.path in ("/connect", "/disconnect", "/settings"):
                     payload = None
-                    if self.path == "/settings":
+                    if self.path == "/settings" or self.headers.get("Content-Length", "0") != "0":
                         try:
                             size = int(self.headers.get("Content-Length", "0"))
                             if not 0 < size <= 1024:
                                 raise ValueError
                             payload = json.loads(self.rfile.read(size))
+                            if not isinstance(payload, dict):
+                                raise ValueError("Expected an object")
                         except (ValueError, TypeError):
                             self.send_error(400)
                             return
+                    if self.path == "/settings":
+                        result = Future()
+                        with view.lock:
+                            if view.settings_pending or view.connection_pending:
+                                self.send_error(409, "Camera operation in progress")
+                                return
+                            view.settings_pending = True
+                        view.requests.put((self.path, (payload, result)))
+                        try:
+                            status, body = 200, {"settings": result.result(timeout=20)}
+                        except Exception as error:
+                            status, body = 409, {"error": str(error) or "等待设备回读超时"}
+                        self.send_response(status)
+                        self.send_header("Content-Type", "application/json; charset=utf-8")
+                        self.end_headers()
+                        self.wfile.write(json.dumps(body).encode())
+                        return
+                    with view.lock:
+                        if view.connection_pending or view.settings_pending:
+                            self.send_error(409, "Camera operation in progress")
+                            return
+                        view.connection_pending = True
                     view.requests.put((self.path, payload))
                     self.send_response(202)
                     self.end_headers()
@@ -111,8 +165,8 @@ class CaptureView:
                 ):
                     self.send_error(404)
                     return
-                if self.path in ("/save", "/record/start") and view.jpeg is None:
-                    self.send_error(409, "Waiting for camera frames")
+                if self.path in ("/save", "/record/start") and not view.can_save():
+                    self.send_error(409, "Waiting for all required camera frames")
                     return
                 if self.path == "/group/next" and not (view.group_status and view.group_status["ready"]):
                     self.send_error(409, "Current group is incomplete")
@@ -134,10 +188,6 @@ class CaptureView:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         Thread(target=self.server.serve_forever, daemon=True).start()
         print(f"CALIBRATION_CAPTURE_PORT={self.server.server_port}", flush=True)
-        if os.environ.get("CALIBRATION_CAPTURE_LOCAL_BROWSER") == "1":
-            url = f"http://127.0.0.1:{self.server.server_port}/"
-            print(f"Camera capture: {url}", flush=True)
-            webbrowser.open(url)
         return self
 
     def prepare(self, adapters, opener):
@@ -168,7 +218,8 @@ class CaptureView:
             self.state = "disconnecting"
             self.record.clear()
             self.save.clear()
-            self.jpeg = None
+            with self.lock:
+                self.frames = {}
             self.images.clear()
             for adapter, _ in reversed(adapters):
                 try:
@@ -180,21 +231,77 @@ class CaptureView:
             self.state = "disconnected"
             self.log("已结束采集流并关闭相机")
         elif action == "/settings":
-            try:
-                label, field = payload["label"], payload["field"]
-                if field not in ("exposure_us", "gain") or label not in self.controls:
-                    raise ValueError("此设备或参数不支持实时调节")
-                adapter = next(
-                    adapter for adapter, group in adapters if group[0]["label"] == label
-                )
-                adapter.set_live_setting(field, float(payload["value"]))
-                self.refresh_controls(adapters)
-                self.log(
-                    f"{label} {field} 回读值：{self.controls[label][field]['cur']}"
-                )
-            except Exception as error:
-                self.log(f"修改相机参数失败：{error}")
+            self.complete_setting(payload, adapters)
+        if action in ("/connect", "/disconnect"):
+            self.connection_pending = False
         return bool(adapters)
+
+    def prepare_sources(self, adapters, groups):
+        """Manage each independently openable device on the capture thread."""
+        from .sources import open_sources
+
+        if not self.web:
+            return self.prepare(adapters, lambda: open_sources([s for group in groups.values() for s in group]))
+        try:
+            action, payload = self.requests.get_nowait()
+        except Empty:
+            return bool(adapters)
+        if action == "/settings":
+            self.complete_setting(payload, adapters)
+            return bool(adapters)
+        selected = (payload or {}).get("device")
+        for key, sensors in groups.items():
+            if selected is not None and key != selected:
+                continue
+            labels = {sensor["label"] for sensor in sensors}
+            current = next((pair for pair in adapters if pair[1][0]["label"] in labels), None)
+            if action == "/connect" and current is None:
+                self.device_states[key] = "connecting"
+                try:
+                    adapters.extend(open_sources(sensors))
+                    self.device_states[key] = "connected"
+                    self.log(f"{key} 已连接，等待首帧。")
+                except Exception as error:
+                    self.device_states[key] = "failed"
+                    self.log(f"{key} 连接失败：{error}")
+            elif action == "/disconnect" and current is not None:
+                self.record.clear()
+                self.save.clear()
+                self.pair_ready = False
+                adapters.remove(current)
+                self.device_states[key] = "disconnected"
+                try:
+                    current[0].close()
+                except Exception as error:
+                    self.log(f"{key} 关闭失败：{error}")
+                for label in labels:
+                    name = f"Sensor calibration: {label}"
+                    self.images.pop(name, None)
+                    with self.lock:
+                        self.frames = {title: frame for title, frame in self.frames.items() if title != name}
+        self.refresh_controls(adapters)
+        self.state = ("connected" if adapters else
+                      "failed" if "failed" in self.device_states.values() else "disconnected")
+        self.connection_pending = False
+        return bool(adapters)
+
+    def complete_setting(self, request, adapters):
+        payload, result = request
+        try:
+            label, field = payload["label"], payload["field"]
+            if field not in ("exposure_us", "gain") or label not in self.controls:
+                raise ValueError("此设备或参数不支持实时调节")
+            adapter = next(adapter for adapter, group in adapters if group[0]["label"] == label)
+            adapter.set_live_setting(field, float(payload["value"]))
+            self.refresh_controls(adapters)
+            self.log(f"{label} {field} 回读值：{self.controls[label][field]['cur']}")
+        except Exception as error:
+            self.log(f"修改相机参数失败：{error}")
+            self.settings_pending = False
+            result.set_exception(error)
+        else:
+            self.settings_pending = False
+            result.set_result(self.controls)
 
     def refresh_controls(self, adapters):
         controls = {}
@@ -238,28 +345,22 @@ class CaptureView:
 
         if self.finish.is_set():
             return 27
+        if self.settings_pending:
+            return -1
         if self.next_group.is_set():
             self.next_group.clear()
             return ord("n")
         now = time.monotonic()
         if self.images and now - self.published >= 0.15:
-            previews = []
-            images = list(self.images.values())
-            height = min(600, *(image.shape[0] for image in images))
-            for image in images:
-                width = max(1, round(image.shape[1] * height / image.shape[0]))
-                resized = cv2.resize(
-                    image, (width, height), interpolation=cv2.INTER_AREA
-                )
-                previews.append(
-                    cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
-                    if resized.ndim == 2
-                    else resized
-                )
-            ok, jpeg = cv2.imencode(".jpg", cv2.hconcat(previews))
-            if ok:
-                first_preview = self.jpeg is None
-                self.jpeg, self.published = jpeg.tobytes(), now
+            frames = {}
+            for name, image in self.images.items():
+                ok, jpeg = cv2.imencode(".jpg", image)
+                if ok:
+                    frames[name] = jpeg.tobytes()
+            if frames:
+                first_preview = not self.frames
+                with self.lock:
+                    self.frames, self.published = frames, now
                 if first_preview:
                     self.log("已收到首张预览图")
         if self.save.is_set():

@@ -1,5 +1,4 @@
 {
-  "camera": "configs/intrinsics/galaxy.json",
   "intrinsics": "configs/intrinsics/galaxy.json",
   "stereo": "configs/extrinsics/galaxy_vcamera_color.json",
   "marker": "configs/markers/double_cube.json",

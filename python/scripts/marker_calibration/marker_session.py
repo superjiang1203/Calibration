@@ -14,7 +14,7 @@ from ..sensor_capture.sources import open_sources, read_sources
 from ..session_storage import sensor_image_directories, utc_now_iso, write_image, write_json
 from ..sensor_capture.preview import CaptureView
 from ..sensor_intrinsics.detection import detect_checkerboard_realtime, prepare_gray8
-from .marker_io import create_detector, detect, detect_gray, detection_gray, refine_marker_corners
+from .marker_io import create_detector, detect, detect_gray, detection_gray, load_camera, refine_marker_corners
 
 
 class StableLabels:
@@ -57,7 +57,8 @@ class CaptureGroups:
         self.reference = marker['reference_marker_id']
         self.options = options
         self.metadata = metadata
-        self.k, self.d = camera['matrix'], camera['distortion']
+        if camera is not None:
+            self.set_camera(camera)
         spec = marker['checkerboard']
         self.pattern = (spec['pattern_cols'], spec['pattern_rows'])
         self.board = object_board(self.pattern, spec['square_size_mm'])
@@ -65,6 +66,9 @@ class CaptureGroups:
     @property
     def index(self):
         return self.metadata['capture_group']
+
+    def set_camera(self, camera):
+        self.k, self.d = camera['matrix'], camera['distortion']
 
     def records(self, group):
         return [record for record in self.metadata['saved_views'] if record['group'] == group]
@@ -203,18 +207,21 @@ def capture_session(config, session, camera, resume=False):
 
 
 def _capture_session(config, session, camera, resume, view):
+    view.title = config.get('capture_title', 'Marker 几何标定 · 相机采集')
     sensor = dict(config['sensor'], label='marker_camera')
     directories = sensor_image_directories([sensor])
     directory = directories['marker_camera']
     detector = create_detector(config['marker']['dictionary'])
     label_state = StableLabels()
     adapters, paths, seen = [], [], Counter()
+    use_factory = config["camera_parameters"] is None
+    session_camera_path = session / 'camera_params.yml'
     sensor_record = {key: str(value) if hasattr(value, '__fspath__') else value for key, value in sensor.items()}
     metadata = {'schema_version': 2, 'calibration_type': 'marker_geometry',
                 'created_at_utc': utc_now_iso(),
                 'sensors': [dict(sensor_record, image_directory=directory)],
                 'images': {'marker_camera': paths}, 'marker': config['marker'],
-                'camera_parameters_source': str(config['camera_parameters']),
+                'camera_parameters_source': 'Vcamera SDK' if use_factory else str(config['camera_parameters']),
                 'camera_parameters': 'camera_params.yml', 'saved_views': []}
     session.mkdir(parents=True, exist_ok=True)
     if resume:
@@ -230,7 +237,8 @@ def _capture_session(config, session, camera, resume, view):
     else:
         if any(session.iterdir()):
             raise ValueError(f'Capture directory is not empty: {session}; use resume explicitly')
-        shutil.copyfile(config['camera_parameters'], session / 'camera_params.yml')
+        if not use_factory:
+            shutil.copyfile(config['camera_parameters'], session_camera_path)
     groups = None
     if config['marker'].get('checkerboard'):
         if resume and ('capture_group' not in metadata or metadata['marker'] != config['marker']):
@@ -246,14 +254,37 @@ def _capture_session(config, session, camera, resume, view):
     write_json(session / 'capture_metadata.json', metadata)
     title = 'Instrument calibration | SPACE save | Q / ESC finish'
     def open_camera():
+        nonlocal camera
         opened = open_sources([sensor])
         try:
             current = opened[0][0].metadata()
             previous = metadata['sensors'][0].get('capture_metadata', {})
-            old_serial = previous.get('device_serial') or previous.get('device_info', {}).get('sn')
-            new_serial = current.get('device_serial') or current.get('device_info', {}).get('sn')
+            old_serial = previous.get('serial_number') or previous.get('device_serial') or previous.get('device_info', {}).get('sn')
+            new_serial = current.get('serial_number') or current.get('device_serial') or current.get('device_info', {}).get('sn')
             if old_serial and new_serial != old_serial:
                 raise ValueError('Cannot capture into the same session with a different camera serial number')
+            factory = current.get('sdk_intrinsics') or {}
+            if use_factory:
+                from ..sensor_capture.vcamera import write_factory_intrinsics
+
+                if not factory:
+                    raise ValueError('Vcamera SDK 未提供当前采集模式的出厂内参。')
+                if camera is None:
+                    write_factory_intrinsics(factory, session_camera_path)
+                    camera = load_camera(session_camera_path)
+                    metadata['camera_parameters_source'] = factory.get('source', 'Vcamera SDK')
+                    if groups:
+                        groups.set_camera(camera)
+                    view.log(f'已读取 Vcamera SDK 出厂内参：{camera["image_size"]}。')
+                else:
+                    matrix = np.asarray(factory['camera_matrix'])
+                    distortion = np.asarray(factory['distortion_coefficients']).reshape(-1)
+                    if (matrix.shape != camera['matrix'].shape or distortion.shape != camera['distortion'].shape
+                            or not np.allclose(camera['matrix'], matrix) or not np.allclose(camera['distortion'], distortion)):
+                        raise ValueError('Vcamera 当前出厂内参与会话内参不同，请新建采集会话。')
+            size = current.get('image_size') or factory.get('image_size')
+            if size is not None and list(size) != list(camera['image_size']):
+                raise ValueError(f'相机图像尺寸 {size} 与所选内参的尺寸 {camera["image_size"]} 不一致。')
             metadata['sensors'][0]['capture_metadata'] = current
             write_json(session / 'capture_metadata.json', metadata)
             return opened

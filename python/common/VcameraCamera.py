@@ -69,6 +69,11 @@ class VcameraCamera:
         if not status:
             raise RuntimeError(f'Vcamera {operation}: {status.message()}')
 
+    @staticmethod
+    def discover_devices(sdk):
+        return [device for device in sdk.CameraUtils.DiscoverCameras()
+                if device.model or device.network_info.ip]
+
     def open(self):
         if self.is_open:
             return
@@ -79,7 +84,7 @@ class VcameraCamera:
                                'python -m python.scripts.install_sdks vcamera') from exc
         sdk = self.sdk
         self.check(sdk.CameraUtils.Init(True), 'initialize')
-        devices = sdk.CameraUtils.DiscoverCameras()
+        devices = self.discover_devices(sdk)
         matches = [d for d in devices
                    if (not self.args.serial_number or d.serial_number == self.args.serial_number)
                    and (not self.args.ip_address or d.network_info.ip == self.args.ip_address)]

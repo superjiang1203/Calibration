@@ -94,11 +94,11 @@ def capture_poses(paths, geometry, camera, detector, threshold):
     return accepted, rejected
 
 
-def run_configured(command, config_path, session=None):
+def run_configured(command, config_path, session=None, *, camera_vendor=None, camera_intrinsics=None):
     from ..session_storage import timestamp_directory
     from ..workflow.config import PROJECT_ROOT
     from .marker_session import capture_session
-    from .marker_io import load_config
+    from .marker_io import load_config, select_capture_camera
 
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     geometry = (config_path.parent / config["geometry"]).resolve()
@@ -108,6 +108,7 @@ def run_configured(command, config_path, session=None):
         if session is not None:
             raise ValueError("Pivot capture starts a new session")
         capture_config = load_config(config_path.parent / config["capture_config"])
+        capture_config["capture_title"] = "竖轴定位 · 相机采集"
         document = yaml.safe_load(geometry.read_text(encoding="utf-8-sig"))
         ids = sorted(int(mid) for mid in document["marker_positions"])
         capture_config["marker"] = {
@@ -119,7 +120,9 @@ def run_configured(command, config_path, session=None):
             capture_config["camera_parameters"] = (
                 config_path.parent / config["intrinsics"]
             ).resolve()
-        camera = load_camera(capture_config["camera_parameters"])
+        select_capture_camera(capture_config, camera_vendor, camera_intrinsics)
+        camera_path = capture_config["camera_parameters"]
+        camera = load_camera(camera_path) if camera_path else None
         session = timestamp_directory(PROJECT_ROOT / "data")
         print(f"Capture session: {session}", flush=True)
         if not capture_session(capture_config, session, camera):
@@ -132,6 +135,7 @@ def run_configured(command, config_path, session=None):
     # main requires a new directory so a prior result cannot be overwritten.
     output = timestamp_directory(PROJECT_ROOT / "output")
     output.rmdir()
+    print(f"Results: {output}", flush=True)
     return main(
         [
             "--geometry",

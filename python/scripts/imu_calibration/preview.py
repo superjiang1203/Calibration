@@ -370,13 +370,15 @@ def overlay(
 
 
 PAGE = Path(__file__).with_suffix(".html").read_text(encoding="utf-8")
+IMAGE_ZOOM = (Path(__file__).resolve().parents[1] / "sensor_capture/image_zoom.js").read_bytes()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--geometry", required=True)
-    parser.add_argument("--intrinsics", required=True)
+    parser.add_argument("--intrinsics")
     parser.add_argument("--serial", default="MAF26040019")
+    parser.add_argument("--camera", choices=("galaxy", "vcamera"), default="galaxy")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--exposure-us", type=float, default=None)
@@ -393,14 +395,18 @@ def main():
         int(mid): np.array(q, np.float64)
         for mid, q in geometry["marker_positions"].items()
     }
-    storage = cv2.FileStorage(args.intrinsics, cv2.FILE_STORAGE_READ)
-    k = storage.getNode("camera_matrix").mat()
-    d = storage.getNode("distortion_coefficients").mat()
-    size = [
-        int(storage.getNode("image_width").real()),
-        int(storage.getNode("image_height").real()),
-    ]
-    storage.release()
+    if args.camera == "galaxy":
+        if args.intrinsics is None:
+            parser.error("Galaxy requires --intrinsics")
+        storage = cv2.FileStorage(args.intrinsics, cv2.FILE_STORAGE_READ)
+        if not storage.isOpened():
+            parser.error(f"Cannot open camera intrinsics: {args.intrinsics}")
+        galaxy_calibration = (
+            storage.getNode("camera_matrix").mat(),
+            storage.getNode("distortion_coefficients").mat(),
+            [int(storage.getNode(name).real()) for name in ("image_width", "image_height")],
+        )
+        storage.release()
     params = cv2.aruco.DetectorParameters()
     params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
     params.minMarkerPerimeterRate = 0.008
@@ -410,6 +416,7 @@ def main():
     )
     imu_state = ImuState()
     settings_requests = Queue()
+    setting_pending = threading.Event()
     shared = {
         "state": {"state": "opening_camera"},
         "full": None,
@@ -494,8 +501,8 @@ def main():
                         sample["visual_anchor"] = (
                             dict(
                                 translation_mm=visual["translation_mm"],
-                                camera_matrix=k.tolist(),
-                                distortion_coefficients=d.ravel().tolist(),
+                                camera_matrix=visual["camera_matrix"],
+                                distortion_coefficients=visual["distortion_coefficients"],
                                 full_projection_scale=visual["full_projection_scale"],
                                 zoom_projection=visual.get("zoom_projection"),
                             )
@@ -531,11 +538,20 @@ def main():
                 self.end_headers()
                 self.wfile.write(PAGE.encode())
                 return
+            if self.path == "/image_zoom.js":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(IMAGE_ZOOM)
+                return
             if self.path == "/status":
                 with lock:
                     state = dict(shared["state"])
                     updated = shared.get("updated", time.monotonic())
                     state["camera_open"] = shared["camera_open"]
+                    state["camera_active"] = active.is_set() or shared["camera_busy"] or shared["camera_open"]
+                    state["settings_pending"] = setting_pending.is_set()
                     state["camera_logs"] = list(camera_logs)
                     state["acquisition_requested"] = active.is_set()
                     state["camera_settings"] = (
@@ -545,7 +561,9 @@ def main():
                     )
                 state["preview_age_ms"] = round((time.monotonic() - updated) * 1000)
                 state["calibration_sha256"] = calibration_sha
-                state["serial"] = args.serial
+                state["camera_type"] = args.camera
+                if args.camera == "galaxy":
+                    state["serial"] = args.serial
                 state["imu"] = imu_state.snapshot()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -598,6 +616,12 @@ def main():
                 pass
 
         def do_POST(self):
+            if self.path in ("/start", "/stop", "/imu/reset", "/imu/align") and setting_pending.is_set():
+                self.send_response(409)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "正在等待相机参数回读"}).encode())
+                return
             if self.path == "/camera/settings":
                 result = Future()
                 try:
@@ -609,13 +633,17 @@ def main():
                     if key not in CAMERA_SETTINGS or not math.isfinite(value):
                         raise ValueError("Invalid camera setting or value")
                     with lock:
+                        if setting_pending.is_set():
+                            raise ValueError("正在等待上一项相机参数回读")
                         if not active.is_set() or not shared["camera_open"]:
                             raise ValueError("Camera is disconnected")
+                        setting_pending.set()
                         settings_requests.put((key, value, result))
-                    response = {"camera_settings": result.result(timeout=5)}
+                    response = {"camera_settings": result.result(timeout=20)}
                     status = 200
                 except TimeoutError:
-                    result.cancel()
+                    if result.cancel():
+                        setting_pending.clear()
                     response, status = {"error": "Camera did not respond in time"}, 504
                 except Exception as error:
                     response, status = {"error": str(error)}, 400
@@ -749,10 +777,34 @@ def main():
                     camera_log(f"正在{message}…")
 
             try:
-                next_stage("加载并初始化 Galaxy SDK")
-                if os.name == "nt":
+                next_stage(f"加载并初始化 {args.camera} SDK")
+                if args.camera == "vcamera":
+                    from ...common.VcameraCamera import VcameraCamera
+
+                    camera = VcameraCamera(
+                        stream="color",
+                        exposure_us=args.exposure_us,
+                        exposure_mode="preserve" if args.exposure_us is None else "manual",
+                    )
+                    camera.open()
+                    factory = camera.metadata().get("sdk_intrinsics")
+                    if not factory:
+                        raise ValueError("Vcamera SDK 未提供当前模式的出厂内参")
+                    k = np.asarray(factory["camera_matrix"], np.float64)
+                    d = np.asarray(factory["distortion_coefficients"], np.float64)
+                    size = factory["image_size"]
+                    camera_log(f"已读取 Vcamera SDK 出厂内参：{size[0]} × {size[1]}。")
+                    read_frame = camera.read
+
+                    def read_settings():
+                        return {}
+
+                    def set_setting(_key, _value):
+                        raise ValueError("当前 Vcamera 预览不支持实时修改参数")
+                elif os.name == "nt":
                     from ..sensor_capture.galaxy import GxipyGalaxySource
 
+                    k, d, size = galaxy_calibration
                     camera = GxipyGalaxySource(
                         sensor_index=1,
                         width=size[0],
@@ -771,6 +823,7 @@ def main():
                     read_settings = camera.live_settings
                     set_setting = camera.set_live_setting
                 else:
+                    k, d, size = galaxy_calibration
                     camera = GalaxyCamera()
                     camera.init()
                     next_stage(f"搜索并打开相机 {args.serial}")
@@ -828,9 +881,12 @@ def main():
                                 settings = read_settings()
                                 with lock:
                                     shared["camera_settings"] = settings
-                                result.set_result(settings)
                             except Exception as error:
+                                setting_pending.clear()
                                 result.set_exception(error)
+                            else:
+                                setting_pending.clear()
+                                result.set_result(settings)
                     gray = read_frame(150)
                     if gray is None:
                         if not first_frame and time.monotonic() - stage_started >= 5:
@@ -849,7 +905,7 @@ def main():
                         )
                         first_frame = True
                     with lock:
-                        shared["frame"] = (gray.copy(), time.monotonic())
+                        shared["frame"] = (gray.copy(), time.monotonic(), k, d)
                         shared["capture_sequence"] += 1
             except Exception as error:
                 duration = (
@@ -868,7 +924,7 @@ def main():
                 if camera is not None:
                     try:
                         camera.close()
-                        if os.name != "nt":
+                        if args.camera == "galaxy" and os.name != "nt":
                             camera.uninit()
                     except Exception as error:
                         camera_log(f"释放相机失败：{error}")
@@ -904,7 +960,7 @@ def main():
             if sequence == last_sequence:
                 stop.wait(0.015)
                 continue
-            gray, captured = frame
+            gray, captured, k, d = frame
             last_sequence = sequence
             observed, rejected = detect(gray, detector, points)
             processed += 1
@@ -927,6 +983,9 @@ def main():
                 imu_state.snapshot(),
             )
             state["state"] = "tracking" if state["pose_found"] else "searching_markers"
+            if state["pose_found"]:
+                state["camera_matrix"] = k.tolist()
+                state["distortion_coefficients"] = d.ravel().tolist()
             encoded = [
                 cv2.imencode(".jpg", im, [cv2.IMWRITE_JPEG_QUALITY, 88])[1].tobytes()
                 for im in (full, zoom)

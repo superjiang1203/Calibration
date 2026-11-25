@@ -235,6 +235,6 @@ def draw_subpixel_corners(image, corners):
     for x, y in np.asarray(corners).reshape(-1, 2):
         cx, cy = int(round(float(x) * unit)), int(round(float(y) * unit))
         radius = 3 * unit
-        for color, thickness in ((0, 2), (255, 1)):
+        for color, thickness in (((0, 0, 0), 2), ((255, 255, 255), 1)):
             cv2.line(image, (cx-radius, cy), (cx+radius, cy), color, thickness, cv2.LINE_AA, shift)
             cv2.line(image, (cx, cy-radius), (cx, cy+radius), color, thickness, cv2.LINE_AA, shift)

@@ -22,13 +22,17 @@ ROOT = Path(__file__).resolve().parents[3]
 def upload(ssh, directory, geometry, intrinsics, remote_python):
     files = {
         "geometry.yaml": geometry,
-        "intrinsics.yml": intrinsics,
         "python/common/GalaxyCamera.py": ROOT / "python/common/GalaxyCamera.py",
+        "python/common/VcameraCamera.py": ROOT / "python/common/VcameraCamera.py",
         "python/scripts/sensor_capture/galaxy_controls.py": ROOT
         / "python/scripts/sensor_capture/galaxy_controls.py",
+        "python/scripts/sensor_capture/image_zoom.js": ROOT
+        / "python/scripts/sensor_capture/image_zoom.js",
         "python/scripts/marker_calibration/checkerboard.py": ROOT
         / "python/scripts/marker_calibration/checkerboard.py",
     }
+    if intrinsics is not None:
+        files["intrinsics.yml"] = intrinsics
     for name in ("__init__.py", "attitude.py", "preview.py", "preview.html"):
         relative = f"python/scripts/imu_calibration/{name}"
         files[relative] = ROOT / relative
@@ -54,10 +58,11 @@ def launch_local(args):
             "python.scripts.imu_calibration.preview",
             "--geometry",
             str(args.geometry.resolve()),
-            "--intrinsics",
-            str(args.intrinsics.resolve()),
+            *(["--intrinsics", str(args.intrinsics.resolve())] if args.intrinsics else []),
             "--serial",
             args.serial,
+            "--camera",
+            args.camera,
             "--host",
             "127.0.0.1",
             "--port",
@@ -101,7 +106,7 @@ def launch_local(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--geometry", type=Path, required=True)
-    parser.add_argument("--intrinsics", type=Path, required=True)
+    parser.add_argument("--intrinsics", type=Path)
     parser.add_argument("--ssh", metavar="PROFILE")
     parser.add_argument("--local", action="store_true")
     parser.add_argument(
@@ -111,6 +116,7 @@ def main():
     parser.add_argument("--user")
     parser.add_argument("--remote-python")
     parser.add_argument("--serial", default="MAF26040019")
+    parser.add_argument("--camera", choices=("galaxy", "vcamera"), default="galaxy")
     parser.add_argument("--port", type=int, default=8879)
     parser.add_argument("--remote-port", type=int, default=8789)
     parser.add_argument(
@@ -121,8 +127,12 @@ def main():
     parser.add_argument("--password-prompt", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
+    if args.camera == "galaxy" and args.intrinsics is None:
+        parser.error("Galaxy requires --intrinsics")
+    if args.camera == "vcamera":
+        args.intrinsics = None
     for path in (args.geometry, args.intrinsics, args.bridge):
-        if not path.is_file():
+        if path is not None and not path.is_file():
             parser.error(f"File not found: {path}")
 
     if args.local:
@@ -157,10 +167,11 @@ def main():
                     "python.scripts.imu_calibration.preview",
                     "--geometry",
                     "geometry.yaml",
-                    "--intrinsics",
-                    "intrinsics.yml",
+                    *(["--intrinsics", "intrinsics.yml"] if args.intrinsics else []),
                     "--serial",
                     args.serial,
+                    "--camera",
+                    args.camera,
                     "--host",
                     "127.0.0.1",
                     "--port",

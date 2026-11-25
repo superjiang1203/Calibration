@@ -13,6 +13,8 @@ from ..session_storage import PROJECT_ROOT
 
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "extrinsics" / "galaxy_vcamera_color.json"
 MODES = ("sensor_intrinsics", "sensor_extrinsics")
+CAPTURE_DEFAULTS = dict(target_count=40, preview_max_width=1400, preview_max_height=900,
+                        timeout_ms=1500, min_interval_seconds=1.0, max_pair_delta_ms=5.0)
 _LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _PROFILE_KEYS = {
     "serial_number", "ip_address", "schema_version", "sensor_type", "sensor_index", "stream", "width", "height",
@@ -244,8 +246,7 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
         for key in ("width", "height", "acquisition_fps", "exposure_sdk", "gain_sdk", "pixel_format", "laser_mode"):
             if sensors[0].get(key) != sensors[1].get(key):
                 raise ValueError(f"Shared-device IR pair requires matching {key}")
-    capture_defaults = dict(target_count=40, preview_max_width=1400, preview_max_height=900,
-                            timeout_ms=1500, min_interval_seconds=1.0, max_pair_delta_ms=5.0)
+    capture_defaults = CAPTURE_DEFAULTS.copy()
     capture = _object(raw.get("capture", {}), "capture")
     _keys(capture, set(capture_defaults) | {"_comment", "_comments"}, "capture")
     capture_defaults.update(capture)
@@ -304,3 +305,14 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
     return dict(schema_version=2, mode=mode, board=board, sensors=sensors,
                 capture=capture_defaults, calibration=calibration_defaults,
                 _config_path=str(config_path))
+
+
+def load_preview_config(path: Path, profile: dict) -> dict:
+    sensor = validate_sensor_profile(profile, path)
+    sensor["label"] = f'{sensor["sensor_type"]}_{sensor["stream"]}'
+    return {
+        "mode": "camera_preview", "board": None, "sensors": [sensor],
+        "capture": {"target_count": 0, "preview_max_width": 1400, "preview_max_height": 900,
+                    "timeout_ms": 1500, "min_interval_seconds": 1.0},
+        "_config_path": str(path),
+    }

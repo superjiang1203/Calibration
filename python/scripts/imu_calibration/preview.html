@@ -3,37 +3,64 @@
 <title>Marker 几何与 IMU 姿态实时对比</title>
 <style>
 body{background:#111b25;color:#e2edf4;font:15px/1.5 system-ui,"Microsoft YaHei",sans-serif;margin:20px}h1{font-size:24px}img{max-width:100%;max-height:72vh;object-fit:contain;background:#080e15}main{display:grid;grid-template-columns:minmax(500px,1.4fr) minmax(380px,1fr);gap:18px}pre{white-space:pre-wrap;font-size:13px;color:#9ed1d7}button,select{padding:8px 12px;margin:4px}small{color:#a4bcc9}.panel{background:#192735;padding:14px;border-radius:10px;margin-bottom:16px}.warn{color:#ffd58b}canvas{width:100%;max-width:440px;background:#101923;border-radius:8px}@media(max-width:950px){main{display:block}}
-.cameraView{position:relative;display:inline-block;max-width:100%}.cameraView img{display:block}.cameraView canvas{position:absolute;left:0;top:0;max-width:none;border-radius:0;background:transparent;pointer-events:none}</style>
+.cameraView{position:relative;display:inline-block;max-width:100%}.cameraView img{display:block}.cameraView canvas{position:absolute;left:0;top:0;max-width:none;border-radius:0;background:transparent;pointer-events:none}
+body{margin:10px;font-size:14px}h1{font-size:18px;margin:0 0 6px}p{margin:5px 0}button,select{padding:4px 7px;margin:2px}.panel{padding:8px;margin-bottom:6px;min-width:0}
+main{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.camera-options,.imu-options{grid-column:1/-1}
+main>section.panel:not(.camera-options){text-align:center}
+.imu-options canvas{max-width:260px}
+input[type=number]{width:7em}
+</style>
 <h1>导航棒几何与 IMU 姿态实时对比</h1>
 <p>视觉：实线 20 mm；IMU：虚线 35 mm（I-X / I-Y / I-Z）。两套轴均以 ID84 的标定原点为起点。X 红、Y 绿、Z 蓝。</p>
-<main><section><div class="panel"><div class="cameraView"><img id="cameraImage" src="/stream" alt="实时相机"><canvas id="cameraImu"></canvas></div>
+<main>
+<section class="panel"><h3>实时相机</h3><div class="cameraView"><img id="cameraImage" src="/stream" alt="实时相机"><canvas id="cameraImu"></canvas></div></section>
+<section class="panel"><h3>导航棒角点与原点放大</h3><div class="cameraView"><img id="zoomImage" src="/zoom" alt="标定原点放大"><canvas id="zoomImu"></canvas></div></section>
+<section class="panel camera-options">
 <p><button id="connectCamera" onclick="cameraCommand('/start')">连接相机</button><button id="disconnectCamera" onclick="cameraCommand('/stop')" disabled>断开相机</button> <span id="cameraState"></span></p>
 <p id="cameraCommandStatus" role="status"></p>
 <p id="previewConnectionStatus" class="warn" role="status" hidden></p>
-<p><label>曝光（µs） <input type="number" id="exposure_us" step="any" disabled onchange="setCamera(this)" onkeydown="applyOnEnter(event)"></label>
+<details><summary>曝光、增益和相机日志</summary><p><label>曝光（µs） <input type="number" id="exposure_us" step="any" disabled onchange="setCamera(this)" onkeydown="applyOnEnter(event)"></label>
 <label>增益 <input type="number" id="gain" step="any" disabled onchange="setCamera(this)" onkeydown="applyOnEnter(event)"></label>
 <span id="settingStatus" role="status"></span></p>
-<small>输入数值后按 Enter 或移出输入框应用。断开相机后仍可查看右侧 IMU。</small>
-<h3>相机日志</h3><pre id="cameraLog" tabindex="0" style="max-height:16rem;overflow:auto;background:#101923;padding:10px">等待连接相机…</pre></div>
-<div class="panel"><h3>导航棒角点与原点放大</h3><div class="cameraView"><img id="zoomImage" src="/zoom" alt="标定原点放大"><canvas id="zoomImu"></canvas></div><p>绿：检测角点；红：几何投影；黄：残差。至少三个码时轮流留出一个完整码验证。</p></div></section>
-<section><div class="panel"><h3>IMU 原始姿态（独立参考系）</h3><canvas id="attitude" width="440" height="280"></canvas>
+<small>输入数值后按 Enter 或移出输入框应用。</small>
+<pre id="cameraLog" tabindex="0" style="max-height:10rem;overflow:auto;background:#101923;padding:8px">等待连接相机…</pre></details></section>
+<details class="panel imu-options"><summary>IMU 姿态、坐标设置和调试状态</summary><canvas id="attitude" width="440" height="280"></canvas>
 <p><select id="source" onchange="command('/imu/reset',{source:this.value})"><option value="icm42670">ICM42670 EKF</option><option value="jy931">JY931</option></select>
 <button onclick="command('/imu/align')">将当前 IMU 姿态对齐视觉轴</button><button onclick="command('/imu/reset')">恢复原始姿态</button></p>
 <p id="rate">测量实际姿态更新频率…</p><p class="warn" id="mode">等待 IMU 数据</p><p id="imuText"></p>
-<small>原始四元数按 WXYZ、主动旋转显示。欧拉角约定 R = Rz(yaw) Ry(pitch) Rx(roll)。单次对齐只让当前两套轴重合，假设安装轴一致；它不是安装外参标定，不能据此判断绝对姿态精度。相机和 IMU 未做硬件同步。IMU 数据超过 500 ms 会隐藏叠加轴。</small></div>
-<div class="panel"><h3>实时状态</h3><p id="message"></p><pre id="state">正在连接…</pre></div></section></main>
+<small>原始四元数按 WXYZ、主动旋转显示。欧拉角约定 R = Rz(yaw) Ry(pitch) Rx(roll)。单次对齐只让当前两套轴重合，假设安装轴一致；它不是安装外参标定，不能据此判断绝对姿态精度。相机和 IMU 未做硬件同步。IMU 数据超过 500 ms 会隐藏叠加轴。</small>
+<p>绿：检测角点；红：几何投影；黄：残差。至少三个码时轮流留出一个完整码验证。</p>
+<p id="message"></p><pre id="state">正在连接…</pre></details></main>
+<script src="/image_zoom.js"></script>
 <script>
+if (typeof mountImageZoom === 'function') {
+    for (const id of ['cameraImage', 'zoomImage']) {
+        const image = document.getElementById(id);
+        try {
+            mountImageZoom(image.parentElement, image);
+        } catch (error) {
+            console.warn('Preview zoom unavailable', error);
+        }
+    }
+}
 let changingSetting = false;
+let settingPendingRemote = false;
 let cameraCommandPending = false;
 let acquisitionRequested = false;
 
 function updateCameraControls() {
-    document.getElementById('connectCamera').disabled = cameraCommandPending || acquisitionRequested;
-    document.getElementById('disconnectCamera').disabled = cameraCommandPending || !acquisitionRequested;
+    const settingLocked = changingSetting || settingPendingRemote;
+    document.getElementById('connectCamera').disabled = settingLocked || cameraCommandPending || acquisitionRequested;
+    document.getElementById('disconnectCamera').disabled = settingLocked || cameraCommandPending || !acquisitionRequested;
+    for (const control of document.querySelectorAll('.imu-options button, .imu-options select')) control.disabled = settingLocked;
+    if (settingLocked) {
+        for (const key of ['exposure_us', 'gain']) document.getElementById(key).disabled = true;
+    }
 }
 
 async function cameraCommand(path) {
-    if (cameraCommandPending) return;
+    if (cameraCommandPending || changingSetting || settingPendingRemote) return;
     const feedback = document.getElementById('cameraCommandStatus');
     cameraCommandPending = true;
     updateCameraControls();
@@ -69,7 +96,7 @@ function showCameraSettings(settings) {
     for (const key of ['exposure_us', 'gain']) {
         const input = document.getElementById(key),
             setting = settings[key];
-        input.disabled = !setting;
+        input.disabled = !setting || changingSetting || settingPendingRemote;
         if (!setting) {
             input.value = '';
             continue
@@ -81,13 +108,15 @@ function showCameraSettings(settings) {
     }
 }
 async function setCamera(input) {
-    if (changingSetting || input.value === '') return;
+    if (changingSetting || settingPendingRemote || input.value === '') return;
     changingSetting = true;
+    updateCameraControls();
     const message = document.getElementById('settingStatus');
     message.textContent = '正在应用…';
     try {
         const response = await fetch('/camera/settings', {
             method: 'POST',
+            signal: AbortSignal.timeout(21000),
             headers: {
                 'Content-Type': 'application/json'
             },
@@ -100,14 +129,16 @@ async function setCamera(input) {
         if (!response.ok) throw new Error(result.error);
         input.value = result.camera_settings[input.id].cur;
         showCameraSettings(result.camera_settings);
-        message.textContent = '已应用';
+        message.textContent = '调整成功，设备回读值为 ' + result.camera_settings[input.id].cur + '。';
     } catch (error) {
         message.textContent = error.message
     } finally {
-        changingSetting = false
+        changingSetting = false;
+        updateCameraControls();
     }
 }
 async function command(path, body = {}) {
+    if (changingSetting || settingPendingRemote) return;
     try {
         let r = await fetch(path, {
             method: 'POST',
@@ -181,6 +212,7 @@ setInterval(async () => {
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const s = await response.json();
+        settingPendingRemote = Boolean(s.settings_pending);
         statusFailures = 0;
         connectionStatus.hidden = true;
         const imu = s.imu || {};

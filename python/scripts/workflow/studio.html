@@ -4,81 +4,344 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>相机标定工作台</title>
 <style>
-body { background: #15212c; color: #ecf2f7; font: 16px system-ui, sans-serif; margin: 20px; }
-[hidden] { display: none; }
-nav { display: flex; flex-wrap: wrap; gap: 8px; }
-button { padding: 8px 14px; }
-button[aria-pressed="true"] { background: #80caff; color: #10202e; }
-iframe { width: 100%; height: 76vh; border: 1px solid #567; }
-pre { max-height: 14rem; overflow: auto; white-space: pre-wrap; background: #101923; padding: 12px; }
+:root { color-scheme: dark; font: 15px system-ui, sans-serif; color: #e8edf4; background: #10151d; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 20px 28px; border-bottom: 1px solid #293544; background: #151d28; }
+h1, h2, h3, p { margin: 0; }
+h1 { font-size: 20px; } h2 { font-size: 24px; } h3 { font-size: 15px; }
+.muted { color: #a7b6c9; }
+.shell { display: grid; grid-template-columns: 214px minmax(0, 1fr); min-height: calc(100vh - 69px); }
+nav { display: flex; flex-direction: column; gap: 6px; padding: 20px 12px; border-right: 1px solid #293544; background: #151d28; }
+button { font: inherit; cursor: pointer; padding: 8px 12px; color: inherit; border: 1px solid #3a4a5c; border-radius: 7px; background: #202c3b; }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #78c7f5; outline-offset: 2px; }
+nav button { text-align: left; background: transparent; border-color: transparent; }
+nav button[aria-pressed="true"] { color: #a8dfff; background: #21374b; border-color: #355773; }
+nav button:disabled { color: #8c95a0; background: #20262e; border-color: transparent; opacity: .5; }
+main { display: grid; align-content: start; gap: 16px; padding: 24px; min-width: 0; }
+.card { background: #171f2a; border: 1px solid #293544; border-radius: 12px; padding: 18px; min-width: 0; }
+.intro { display: grid; gap: 8px; margin-bottom: 14px; }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; }
+label { display: grid; gap: 5px; font-size: 13px; color: #c3cfdf; }
+input, select { width: 100%; padding: 9px 11px; border: 1px solid #3a4a5c; border-radius: 7px; background: #101721; color: #e8edf4; font: inherit; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.primary { background: #86d0ff; border-color: #86d0ff; color: #0a202f; font-weight: 650; }
+.status-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 14px; margin: 12px 0 0; }
+dd { margin: 0; overflow-wrap: anywhere; } dt { color: #a7b6c9; }
+iframe { width: 100%; height: 74vh; background: #15212c; border: 1px solid #293544; border-radius: 12px; }
+main:has(#workspace:not([hidden])) .task-config { display: none; }
+pre { max-height: 20rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #101721; padding: 12px; margin: 10px 0 0; border-radius: 8px; }
+@media (max-width: 700px) {
+    .shell { grid-template-columns: 1fr; }
+    nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid #293544; }
+    header, main { padding: 15px; }
+}
 </style>
-<h1>相机标定工作台</h1>
-<nav aria-label="采集及标定模式">
-    <button data-mode="camera">相机拍摄</button>
-    <button data-mode="intrinsics">普通标定</button>
-    <button data-mode="stereo">双目标定</button>
-    <button data-mode="marker">Marker 标定</button>
-    <button data-mode="pivot">竖轴定位</button>
-    <button data-mode="imu">IMU 预览</button>
-</nav>
-<p id="status" role="status">请选择采集或标定模式。</p>
-<button id="stop" hidden>关闭 IMU 预览</button>
-<iframe id="workspace" title="当前采集或预览" hidden></iframe>
-<h2>任务日志</h2>
-<pre id="logs">等待开始任务。</pre>
+<header>
+    <h1>相机标定工作台</h1>
+    <span class="muted">执行主机 <strong id="target">—</strong></span>
+    <button id="exitStudio" type="button">退出工作台</button>
+</header>
+<div class="shell">
+    <nav aria-label="工作台功能">
+        <button data-mode="galaxy">Galaxy 灰度</button>
+        <button data-mode="vcamera">Vcamera RGB</button>
+        <button data-mode="intrinsics">普通内参</button>
+        <button data-mode="stereo">双目外参</button>
+        <button data-mode="marker">Marker 几何标定</button>
+        <button data-mode="pivot">竖轴定位</button>
+        <button data-mode="imu">IMU 预览</button>
+    </nav>
+    <main>
+        <section class="card task-config" aria-labelledby="modeTitle">
+            <div class="intro">
+                <h2 id="modeTitle"></h2>
+                <p id="modeHelp" class="muted"></p>
+            </div>
+            <div class="fields" id="fields"></div>
+            <div class="actions" id="actions"></div>
+        </section>
+        <section class="card" aria-labelledby="taskTitle">
+            <div class="status-row">
+                <h3 id="taskTitle">当前任务</h3>
+                <button id="stop" hidden>关闭 IMU 预览</button>
+            </div>
+            <p id="status" class="muted" role="status">等待开始任务。</p>
+            <dl id="paths" hidden>
+                <dt>采集会话</dt><dd id="sessionPath">—</dd>
+                <dt>结果路径</dt><dd id="resultPath">—</dd>
+            </dl>
+        </section>
+        <iframe id="workspace" title="当前采集或预览" hidden></iframe>
+        <section class="card" aria-labelledby="logTitle">
+            <h3 id="logTitle">任务日志</h3>
+            <pre id="logs" tabindex="0">等待开始任务。</pre>
+        </section>
+    </main>
+</div>
 <script>
-const workspace = document.querySelector('#workspace');
-const buttons = [...document.querySelectorAll('[data-mode]')];
-const stop = document.querySelector('#stop');
-const logs = document.querySelector('#logs');
-const status = document.querySelector('#status');
-let busy = false, actionError = '';
-async function action(path) {
-    if (busy) return;
+const byId = id => document.getElementById(id);
+const nav = [...document.querySelectorAll('[data-mode]')];
+const inputs = {
+    preset: ['任务配置 JSON', 'configs/…'],
+    session: ['采集会话路径', 'data/会话目录'],
+    calibration_dir: ['标定结果目录', 'output/结果目录'],
+    geometry: ['本机 marker 几何 YAML', 'output/…/geometry.yaml'],
+    intrinsics: ['本机相机内参 YAML', 'output/…/intrinsics.yml'],
+    frame: ['测试帧保存路径', 'output/vcamera_test.png'],
+    camera: ['采集相机', ''],
+    camera_intrinsics: ['所选相机的内参 YAML（执行主机）', 'output/…/intrinsics.yml'],
+    factory_output: ['出厂内参保存路径', 'output/vcamera_factory.yml']
+};
+const sensorActions = [
+    ['run', '采集并标定'], ['capture', '只采集原图'],
+    ['calibrate', '标定已有会话', 'session'], ['verify', '复核已有结果', 'session', 'calibration_dir']
+];
+const modes = {
+    galaxy: {
+        help: '打开 Galaxy 预览后，在页面内连接相机、调节曝光与增益，也可以保存原图。',
+        fields: ['preset'], actions: [['capture', '打开 Galaxy 预览']]
+    },
+    intrinsics: {
+        help: '用棋盘图像估计单相机内参，也可用已有会话标定或复核。',
+        fields: ['camera', 'preset', 'session', 'calibration_dir'], actions: sensorActions
+    },
+    stereo: {
+        help: '采集配对棋盘图像，求解两台相机之间的变换。复核使用已有 YAML。',
+        fields: ['preset', 'session', 'calibration_dir'], actions: sensorActions
+    },
+    marker: {
+        help: '每组固定棋盘和靶标，移动相机。第一组拍顶部参考码与侧码，后续组保留已拍足的共视码。',
+        fields: ['camera', 'preset', 'session'], actions: [
+            ['run', '开始分组采集'], ['run', '继续采集', 'session'],
+            ['calibrate', '标定已有会话', 'session'], ['detect', '检查角点', 'session']
+        ]
+    },
+    pivot: {
+        help: '保持工具球尖位置固定，从不同方向倾斜并滚转工具，采集后自动求解。',
+        fields: ['camera', 'preset', 'session'], actions: [
+            ['run', '采集并求解'], ['capture', '只采集原图'], ['calibrate', '求解已有会话', 'session']
+        ]
+    },
+    imu: {
+        help: '在工作台查看视觉与 IMU 姿态。SSH 模式使用这里指定的本机 YAML 文件。',
+        fields: ['camera', 'geometry', 'intrinsics'], actions: [['preview', '打开 IMU 预览', 'geometry', 'intrinsics']]
+    },
+    vcamera: {
+        help: '打开图漾 RGB 实时预览，也可以枚举设备、检查控制项或保存测试帧。',
+        fields: ['preset', 'frame'], actions: [
+            ['capture', '打开 RGB 预览'], ['devices', '枚举设备'], ['inspect', '检查设备'], ['frame', '保存测试帧', 'frame']
+        ]
+    }
+};
+let selected = 'galaxy';
+let state = {};
+let busy = false;
+let actionError = '';
+let exiting = false;
+const values = Object.fromEntries(Object.keys(modes).map(mode => [mode, {}]));
+let galaxyIntrinsicsPreset = 'configs/intrinsics/galaxy.json';
+function renderPanel() {
+    const mode = modes[selected];
+    const selectedCamera = values[selected].camera;
+    const cameraOverride = ['marker', 'pivot'].includes(selected) && selectedCamera;
+    const useFactoryImu = selected === 'imu' && selectedCamera === 'vcamera';
+    const factoryMode = selected === 'intrinsics' && selectedCamera === 'vcamera';
+    const fields = factoryMode ? ['camera', 'preset', 'factory_output']
+        : useFactoryImu ? ['camera', 'geometry']
+        : cameraOverride === 'galaxy' ? [...mode.fields, 'camera_intrinsics'] : mode.fields;
+    const actions = factoryMode
+        ? [['capture', '打开 RGB 预览'], ['factory', '读取出厂内参', 'factory_output']]
+        : useFactoryImu ? [['preview', '打开 IMU 预览', 'geometry']] : mode.actions;
+    byId('modeTitle').textContent = nav.find(button => button.dataset.mode === selected).textContent;
+    byId('modeHelp').textContent = factoryMode ? 'Vcamera 使用 SDK 出厂内参。可打开 RGB 预览，或导出当前采集模式的内参 YAML。'
+        : selectedCamera === 'vcamera' && (cameraOverride || useFactoryImu) ? mode.help + ' Vcamera 内参由 SDK 自动读取。' : mode.help;
+    byId('fields').replaceChildren(...fields.map(key => {
+        const [title, hint] = inputs[key];
+        const label = document.createElement('label');
+        const field = document.createElement(key === 'camera' ? 'select' : 'input');
+        label.append(title, field);
+        if (key === 'camera') {
+            const defaultName = ['marker', 'pivot'].includes(selected) ? '使用任务配置' : 'Galaxy 灰度';
+            field.add(new Option(defaultName, ''));
+            if (['marker', 'pivot'].includes(selected)) field.add(new Option('Galaxy 灰度', 'galaxy'));
+            field.add(new Option('Vcamera RGB', 'vcamera'));
+        } else {
+            field.placeholder = hint;
+        }
+        field.value = values[selected][key] || '';
+        field.addEventListener('input', () => {
+            values[selected][key] = field.value;
+            if (key === 'camera') {
+                if (selected === 'intrinsics') {
+                    values[selected].preset = field.value === 'vcamera'
+                        ? 'configs/cameras/vcamera_color.json' : galaxyIntrinsicsPreset;
+                }
+                renderPanel();
+                return;
+            }
+            updateControls();
+        });
+        return label;
+    }));
+    byId('actions').replaceChildren(...actions.map(([command, title, ...required], index) => {
+        const button = document.createElement('button');
+        button.textContent = title;
+        button.classList.toggle('primary', index === 0);
+        const overrideCapture = cameraOverride && ['run', 'capture'].includes(command);
+        if (overrideCapture && selectedCamera === 'galaxy') required.push('camera_intrinsics');
+        button.dataset.required = required.join(',');
+        button.onclick = () => {
+            const payload = {command};
+            if (selectedCamera && (overrideCapture || factoryMode || selected === 'imu')) payload.camera = selectedCamera;
+            const usePreset = mode.fields.includes('preset') && command !== 'devices';
+            for (const key of (usePreset ? [...required, 'preset'] : required)) {
+                const value = values[selected][key]?.trim();
+                if (value) payload[key] = value;
+            }
+            action('/start/' + selected, payload);
+        };
+        return button;
+    }));
+    updateControls();
+}
+
+function updateControls() {
+    const locked = busy || state.running || exiting;
+    nav.forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.mode === selected));
+        button.disabled = Boolean(busy || exiting || state.camera_locked);
+    });
+    byId('stop').disabled = Boolean(state.settings_pending);
+    byId('exitStudio').disabled = Boolean(exiting || state.settings_pending);
+    byId('fields').querySelectorAll('input, select').forEach(input => input.disabled = locked);
+    byId('actions').querySelectorAll('button').forEach(button => {
+        const required = button.dataset.required.split(',').filter(Boolean);
+        button.disabled = locked || required.some(key => !values[selected][key]?.trim());
+    });
+}
+
+async function action(path, payload) {
+    if (busy || (path !== '/stop' && state.running)) return;
     busy = true;
     actionError = '';
-    buttons.forEach(button => button.disabled = true);
+    updateControls();
     try {
-        const response = await fetch(path, {method: 'POST', signal: AbortSignal.timeout(5000)});
+        const response = await fetch(path, {
+            method: 'POST', signal: AbortSignal.timeout(5000),
+            ...(payload && {headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)})
+        });
         if (!response.ok) throw new Error((await response.json()).error);
+        if (path !== '/stop') state.running = true;
     } catch (error) {
         actionError = error.message;
     } finally {
         busy = false;
+        updateControls();
     }
 }
-buttons.forEach(button => button.onclick = () => action('/start/' + button.dataset.mode));
-stop.onclick = () => action('/stop');
+
+nav.forEach(button => button.onclick = async () => {
+    if (button.disabled || selected === button.dataset.mode) return;
+    if (state.running) {
+        busy = true;
+        updateControls();
+        try {
+            const response = await fetch('/switch', {method: 'POST', signal: AbortSignal.timeout(22000)});
+            if (!response.ok) throw new Error((await response.json()).error);
+        } catch (error) {
+            actionError = error.message;
+            return;
+        } finally {
+            busy = false;
+            updateControls();
+        }
+    }
+    selected = button.dataset.mode;
+    actionError = '';
+    renderPanel();
+});
+byId('stop').onclick = () => action('/stop');
+byId('exitStudio').onclick = async () => {
+    if (exiting || state.settings_pending) return;
+    if (state.running && !window.confirm('当前任务仍在运行。退出将中止任务，已保存的原图会保留。确定退出？')) return;
+    exiting = true;
+    byId('exitStudio').disabled = true;
+    byId('status').textContent = '正在停止任务并退出工作台…';
+    updateControls();
+    try {
+        const response = await fetch('/shutdown', {method: 'POST', signal: AbortSignal.timeout(25000)});
+        if (!response.ok) throw new Error((await response.json()).error);
+        byId('workspace').removeAttribute('src');
+        byId('workspace').hidden = true;
+        byId('stop').hidden = true;
+        byId('status').textContent = '工作台已退出。若浏览器保留此页签，可以直接关闭。';
+        window.close();
+    } catch (error) {
+        exiting = false;
+        byId('exitStudio').disabled = false;
+        actionError = error.message;
+        updateControls();
+        refresh();
+    }
+};
+
 async function refresh() {
     try {
         const response = await fetch('/status', {cache: 'no-store', signal: AbortSignal.timeout(2500)});
-        const state = await response.json();
-        const active = buttons.find(button => button.dataset.mode === state.mode);
-        const name = active?.textContent;
-        buttons.forEach(button => {
-            button.disabled = busy || state.running;
-            button.setAttribute('aria-pressed', button === active && state.running ? 'true' : 'false');
-        });
-        stop.hidden = !(state.running && state.mode === 'imu');
+        if (!response.ok) throw new Error('status');
+        const previous = state;
+        state = await response.json();
+        if (exiting) return;
+        if (state.session && state.mode && state.session !== previous.session) {
+            values[state.mode].session = state.session;
+            if (selected === state.mode) renderPanel();
+        }
+        updateControls();
+        const name = nav.find(button => button.dataset.mode === state.mode)?.textContent || '';
+        byId('stop').hidden = !(state.running && state.mode === 'imu');
+        const workspace = byId('workspace');
         if (state.url && workspace.getAttribute('src') !== state.url) workspace.src = state.url;
-        if (!state.url) workspace.removeAttribute('src');
+        if (!state.url && workspace.hasAttribute('src')) workspace.removeAttribute('src');
         workspace.hidden = !state.url;
-        status.textContent = actionError || (state.running
-            ? name + (state.url ? '运行中。' : '正在启动…')
-            : state.exit_code === null ? '请选择采集或标定模式。'
+        byId('status').textContent = actionError || (state.running
+            ? name + (state.phase === 'solve' ? '正在处理已有数据…' : state.url ? '运行中。' : '正在启动…')
+            : state.phase === 'paused' ? '已保存采集进度，可继续采集。'
+            : state.phase === 'switched' ? '已结束上一项任务，可启动所选页签。'
+            : state.exit_code === null ? '等待开始任务。'
             : name + (state.exit_code === 0 ? '已完成。' : '未完成，请查看任务日志。'));
-        const text = state.logs.join('\n');
-        if (text && logs.textContent !== text) {
-            const follow = logs.scrollHeight - logs.scrollTop - logs.clientHeight <= 8;
-            logs.textContent = text;
-            if (follow) logs.scrollTop = logs.scrollHeight;
+        byId('paths').hidden = !state.session && !state.result;
+        byId('sessionPath').textContent = state.session || '—';
+        byId('resultPath').textContent = state.result || '—';
+        const log = byId('logs');
+        const text = state.logs.join('\n') || '等待任务输出。';
+        if (log.textContent !== text) {
+            const follow = log.scrollHeight - log.scrollTop - log.clientHeight <= 8;
+            log.textContent = text;
+            if (follow) log.scrollTop = log.scrollHeight;
         }
     } catch {
-        status.textContent = '暂时无法读取工作台状态。';
+        byId('status').textContent = '暂时无法读取工作台状态。';
     } finally {
-        setTimeout(refresh, 350);
+        if (!exiting) setTimeout(refresh, 350);
     }
 }
+
+renderPanel();
+fetch('/presets').then(response => response.json()).then(({target, presets}) => {
+    byId('target').textContent = target;
+    for (const mode of Object.keys(modes)) {
+        const preset = presets[mode];
+        if (typeof preset === 'string') values[mode].preset ??= preset;
+    }
+    values.imu.geometry ??= presets.imu?.geometry;
+    galaxyIntrinsicsPreset = presets.intrinsics || galaxyIntrinsicsPreset;
+    values.imu.intrinsics ??= presets.imu?.intrinsics;
+    renderPanel();
+}).catch(() => { byId('target').textContent = '读取失败'; });
 refresh();
 </script>
 </html>

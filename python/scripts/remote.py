@@ -7,6 +7,7 @@ import os
 import select
 import shlex
 import tempfile
+import time
 import webbrowser
 import zipfile
 from getpass import getpass
@@ -131,10 +132,13 @@ def run_workflow(args, root, *, marker=False):
     for flag, value in (
         ("--session", args.session),
         ("--calibration-dir", getattr(args, "calibration_dir", None)),
+        ("--camera-intrinsics", getattr(args, "camera_intrinsics", None)),
     ):
         if value is not None:
             command_args.extend((flag, remote_path(value, root)))
     script = "calibrate_marker.py" if marker else "calibrate.py"
+    if camera := getattr(args, "camera", None):
+        command_args.extend(("--camera", camera))
     return run_calibration(args, root, command_args, script=script)
 
 
@@ -170,7 +174,7 @@ def run_calibration(args, root, command_args, *, script=None, module=None):
                 with tempfile.TemporaryFile() as archive:
                     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
                         for path in (root / "python").rglob("*"):
-                            if path.is_file() and path.suffix in {".py", ".html"}:
+                            if path.is_file() and path.suffix in {".py", ".html", ".js"}:
                                 bundle.write(path, path.relative_to(root).as_posix())
                     archive.seek(0)
                     with ssh.open_sftp() as sftp:
@@ -199,6 +203,7 @@ def run_calibration(args, root, command_args, *, script=None, module=None):
                         "env",
                         f"CALIBRATION_PROJECT_ROOT={project}",
                         "CALIBRATION_CAPTURE_WEB=1",
+                        f"CALIBRATION_EMBEDDED={os.environ.get('CALIBRATION_EMBEDDED', '0')}",
                         "PYTHONIOENCODING=utf-8",
                         python,
                         "-u",
@@ -227,6 +232,13 @@ def run_calibration(args, root, command_args, *, script=None, module=None):
                             print(line, flush=True)
                     return output.channel.recv_exit_status()
                 except KeyboardInterrupt:
+                    try:
+                        output.channel.sendall(b"\x03")
+                        deadline = time.monotonic() + 5
+                        while not output.channel.exit_status_ready() and time.monotonic() < deadline:
+                            time.sleep(0.1)
+                    except (OSError, paramiko.SSHException):
+                        pass
                     output.channel.close()
                     return 130
             finally:

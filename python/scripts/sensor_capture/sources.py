@@ -70,18 +70,23 @@ def open_sources(sensors):
     return adapters
 
 
-def read_sources(adapters, timeout_ms):
+def read_sources(adapters, timeout_ms, *, on_error=None):
     images, timestamps = {}, {}
     for adapter, sensors in adapters:
-        if isinstance(adapter, OrbbecIRSource):
-            received, device_times = adapter.read(timeout_ms)
-            images.update(received)
-            timestamps.update(device_times)
-        else:
-            image = adapter.read(timeout_ms)
-            if image is not None:
-                label = sensors[0]['label']
-                images[label] = image
-                timestamps[label] = time.monotonic_ns() // 1000
+        try:
+            if isinstance(adapter, OrbbecIRSource):
+                received, device_times = adapter.read(timeout_ms)
+                images.update(received)
+                timestamps.update(device_times)
+            else:
+                image = adapter.read(timeout_ms)
+                if image is not None:
+                    label = sensors[0]['label']
+                    images[label] = image
+                    timestamps[label] = time.monotonic_ns() // 1000
+        except Exception as error:
+            if on_error is None:
+                raise
+            on_error(adapter, sensors, error)
     synchronized = len(adapters) == 1 and isinstance(adapters[0][0], OrbbecIRSource) and len(adapters[0][1]) == 2
     return images, timestamps, synchronized

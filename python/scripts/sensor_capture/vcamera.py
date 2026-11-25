@@ -132,12 +132,13 @@ def inspect_main(argv=None):
                         help='Only discover devices; do not connect or read a profile')
     parser.add_argument('--save-frame', type=Path,
                         help='Apply profile settings and save a single PNG frame')
+    parser.add_argument('--factory-intrinsics', type=Path, help='Export factory camera intrinsics to OpenCV YAML')
     parser.add_argument('--timeout-ms', type=int, default=5000)
     parser.add_argument('--output', type=Path, help='Also save the JSON report')
     args = parser.parse_args(argv)
     if args.timeout_ms <= 0:
         parser.error('--timeout-ms must be positive')
-    if args.list_devices and args.save_frame:
+    if args.list_devices and (args.save_frame or args.factory_intrinsics):
         parser.error('--save-frame cannot be combined with --list-devices')
     if args.save_frame and args.save_frame.suffix.lower() != '.png':
         parser.error('--save-frame requires .png to preserve grayscale values')
@@ -156,7 +157,7 @@ def inspect_main(argv=None):
             raise RuntimeError('Vcamera Python SDK is unavailable. Install with: '
                                'python -m python.scripts.install_sdks vcamera') from exc
         VcameraCamera.check(sdk.CameraUtils.Init(True), 'initialize')
-        devices = sdk.CameraUtils.DiscoverCameras()
+        devices = VcameraCamera.discover_devices(sdk)
         report = {'devices': [dict(sensor_index=i, model=d.model,
                                    serial_number=d.serial_number, ip_address=d.network_info.ip)
                               for i, d in enumerate(devices)]}
@@ -173,6 +174,10 @@ def inspect_main(argv=None):
             if index >= len(devices):
                 raise RuntimeError(f'Vcamera index {index}: discovered {len(devices)} camera(s)')
             report['selected_device'] = report['devices'][index]
+            if args.factory_intrinsics:
+                export_factory_intrinsics(options, args.factory_intrinsics)
+                print(f'Saved OpenCV YAML: {args.factory_intrinsics.resolve()}')
+                return 0
             report['capabilities'] = inspect_device(sdk, devices[index])
             # Pin capture to the inspected device even if discovery order changes.
             options.serial_number = devices[index].serial_number
@@ -192,3 +197,37 @@ def inspect_main(argv=None):
     except (ImportError, OSError, ValueError, RuntimeError) as exc:
         print(f'Vcamera inspection failed: {exc}', file=sys.stderr)
         return 1
+
+
+def export_factory_intrinsics(options, path):
+    adapter = VcameraSource(options)
+    try:
+        adapter.open()
+        intrinsics = adapter.metadata().get("sdk_intrinsics")
+        if not intrinsics:
+            raise ValueError("Vcamera SDK 未提供当前分辨率的出厂内参")
+    finally:
+        adapter.close()
+    write_factory_intrinsics(intrinsics, path)
+
+
+def write_factory_intrinsics(intrinsics, path):
+    import cv2
+    import numpy as np
+
+    path = path.resolve()
+    if path.suffix.lower() not in (".yaml", ".yml"):
+        raise ValueError("出厂内参输出需要 .yaml 或 .yml 文件")
+    if path.exists():
+        raise FileExistsError(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    storage = cv2.FileStorage(".yml", cv2.FILE_STORAGE_WRITE | cv2.FILE_STORAGE_MEMORY | cv2.FILE_STORAGE_FORMAT_YAML)
+    if not storage.isOpened():
+        raise OSError(f"Cannot write {path}")
+    width, height = intrinsics["image_size"]
+    storage.write("image_width", width)
+    storage.write("image_height", height)
+    storage.write("camera_matrix", np.asarray(intrinsics["camera_matrix"], np.float64))
+    storage.write("distortion_coefficients", np.asarray(intrinsics["distortion_coefficients"], np.float64).reshape(1, -1))
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write(storage.releaseAndGetString())
