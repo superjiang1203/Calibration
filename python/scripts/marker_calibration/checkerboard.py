@@ -389,6 +389,20 @@ def object_board(pattern, spacing):
     return result
 
 
+def detect_full_board(image, pattern):
+    """Return every configured inner corner in original image coordinates."""
+    from ..sensor_intrinsics.detection import detect_checkerboard_realtime, prepare_gray8
+
+    found, corners, *_ = detect_checkerboard_realtime(prepare_gray8(image), pattern)
+    if not found or corners is None:
+        return None
+    pixels = corners.reshape(-1, 2)
+    if (len(pixels) != pattern[0] * pattern[1] or not np.isfinite(pixels).all()
+            or np.any(pixels < 0) or np.any(pixels >= np.asarray(image.shape[1::-1]))):
+        return None
+    return pixels
+
+
 def pnp(points, measured, k, d):
     ok, r, t = cv2.solvePnP(
         np.asarray(points, np.float64),
@@ -400,6 +414,58 @@ def pnp(points, measured, k, d):
     if not ok:
         raise ValueError("PnP failed")
     return pose(np.r_[r.ravel(), t.ravel()])
+
+
+def checked_board_pnp(points, measured, k, d, options):
+    """Estimate from a RANSAC consensus, then gate the entire frame on RMS."""
+    limit = options["max_board_pnp_rmse_px"]
+    min_inliers = int(np.ceil(len(points) * (1 - options["max_outlier_fraction"])))
+    quality = {"corner_count": len(points), "min_inliers": min_inliers,
+               "inliers": 0, "rmse_px": None, "limit_px": limit}
+    points = np.ascontiguousarray(points, dtype=np.float64)
+    measured = np.ascontiguousarray(measured, dtype=np.float64)
+    try:
+        ok, _, _, indices = cv2.solvePnPRansac(
+            points, measured, k, d, iterationsCount=200, reprojectionError=limit,
+            confidence=0.999, flags=cv2.SOLVEPNP_AP3P,
+        )
+        if not ok or indices is None:
+            quality["reason"] = "棋盘 PnP RANSAC 未找到有效位姿。"
+            return None, None, quality
+        indices = indices.ravel()
+        quality["inliers"] = len(indices)
+        if len(indices) < min_inliers:
+            quality["reason"] = f"棋盘 PnP RANSAC 内点不足（{len(indices)}/{len(points)}，至少需要 {min_inliers}）。"
+            return None, None, quality
+        # The pose returned by RANSAC can be unstable for a planar board.
+        matrix = pnp(points[indices], measured[indices], k, d)
+        squared = np.sum((project(points, matrix, k, d) - measured)**2, axis=1)
+    except (ValueError, cv2.error):
+        quality["reason"] = "棋盘 PnP 无法求解有效位姿。"
+        return None, None, quality
+    valid = squared <= limit**2
+    rmse = float(np.sqrt(np.mean(squared)))
+    quality["inliers"] = int(valid.sum())
+    if not np.isfinite(rmse):
+        quality["reason"] = "棋盘 PnP 重投影误差无效。"
+        return None, None, quality
+    quality["rmse_px"] = rmse
+    if rmse > limit:
+        quality["reason"] = f"棋盘 PnP 全角点 RMS {rmse:.3f} px 超过上限 {limit:g} px。"
+    elif np.any(transform(matrix, points)[:, 2] <= 0):
+        quality["reason"] = "棋盘 PnP 存在位于相机后方的角点。"
+    elif quality["inliers"] < min_inliers:
+        quality["reason"] = f'棋盘 PnP 精化后内点不足（{quality["inliers"]}/{len(points)}，至少需要 {min_inliers}）。'
+    else:
+        return matrix, valid, quality
+    return None, None, quality
+
+
+def board_halfturn(board):
+    """Map reversed corner indexing back to the original checkerboard basis."""
+    rotation = np.diag([-1.0, -1.0, 1.0, 1.0])
+    rotation[:3, 3] = board[0] + board[-1]
+    return rotation
 
 
 def fit_intrinsics(frames, board, output):
@@ -469,11 +535,12 @@ def fit_intrinsics(frames, board, output):
     return k, d, report
 
 
-def orient_boards(frames, board, k, d):
-    for r in frames:
-        r["board"] = np.asarray(r["board"], np.float64)
-        r["camera"] = pnp(board, r["board"], k, d)
-    halfturn = np.diag([-1.0, -1.0, 1.0])
+def orient_boards(frames, board, k, d, *, poses_estimated=False):
+    if not poses_estimated:
+        for r in frames:
+            r["board"] = np.asarray(r["board"], np.float64)
+            r["camera"] = pnp(board, r["board"], k, d)
+    halfturn = board_halfturn(board)
     flipped = []
     for group in sorted(set(r["group"] for r in frames)):
         candidates = [r for r in frames if r["group"] == group]
@@ -484,18 +551,22 @@ def orient_boards(frames, board, k, d):
         for rotation in rotations:
             direct = Rotation.from_matrix(rotation.T @ rotations).magnitude()
             other = Rotation.from_matrix(
-                rotation.T @ (rotations @ halfturn)
+                rotation.T @ (rotations @ halfturn[:3, :3])
             ).magnitude()
             angles.append(np.minimum(direct, other).sum())
         anchor = rotations[int(np.argmin(angles))]
         for r in candidates:
             direct = Rotation.from_matrix(anchor.T @ r["camera"][:3, :3]).magnitude()
             other = Rotation.from_matrix(
-                anchor.T @ r["camera"][:3, :3] @ halfturn
+                anchor.T @ r["camera"][:3, :3] @ halfturn[:3, :3]
             ).magnitude()
             if other + 1e-6 < direct:
                 r["board"] = r["board"][::-1].copy()
-                r["camera"] = pnp(board, r["board"], k, d)
+                if poses_estimated:
+                    r["camera"] = r["camera"] @ halfturn
+                    r["board_inliers"] = r["board_inliers"][::-1].copy()
+                else:
+                    r["camera"] = pnp(board, r["board"], k, d)
                 flipped.append(r["image"])
     return flipped
 

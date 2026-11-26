@@ -13,7 +13,7 @@ import numpy as np
 from ..sensor_capture.sources import open_sources, read_sources
 from ..session_storage import sensor_image_directories, utc_now_iso, write_image, write_json
 from ..sensor_capture.preview import CaptureView
-from ..sensor_intrinsics.detection import detect_checkerboard_realtime, prepare_gray8
+from ..sensor_intrinsics.detection import prepare_gray8
 from .marker_io import create_detector, detect, detect_gray, detection_gray, load_camera, refine_marker_corners
 
 
@@ -62,6 +62,8 @@ class CaptureGroups:
         spec = marker['checkerboard']
         self.pattern = (spec['pattern_cols'], spec['pattern_rows'])
         self.board = object_board(self.pattern, spec['square_size_mm'])
+        self.center_cache_key = None
+        self.triangulated_corners = {}
 
     @property
     def index(self):
@@ -99,20 +101,42 @@ class CaptureGroups:
         missing = sorted(self.ids - previous - qualified)
         train_total = sum(r['split'] == 'train' for r in self.metadata['saved_views'])
         bridge = qualified & previous
-        ready = len(qualified) >= 2 and (
+        minimum = self.options['min_group_views']
+        ready = len(records) >= minimum and len(qualified) >= 2 and (
             bool(bridge) if self.index else self.reference in qualified
         )
+        ready_groups = self.index + int(ready)
         return {
-            'group': self.index + 1, 'images': len(records), 'ready': ready,
+            'group': self.index + 1, 'images': len(records), 'minimum_images': minimum, 'ready': ready,
+            'ready_groups': ready_groups, 'minimum_groups': self.options['min_groups'],
             'complete': (ready or self.index > 0 and not records) and not missing
+                        and ready_groups >= self.options['min_groups']
                         and train_total >= self.options['min_views'],
             'missing': missing, 'qualified': sorted(qualified), 'bridge': sorted(bridge),
             'previous': sorted(previous),
         }
 
-    def measure(self, image, detector):
-        from .checkerboard import pnp, project
+    def board_pose(self, image, records):
+        from .checkerboard import board_halfturn, checked_board_pnp, detect_full_board
 
+        pixels = detect_full_board(image, self.pattern)
+        if pixels is None:
+            cols, rows = self.pattern
+            raise ValueError(f'棋盘格未完整识别，需要 {cols}×{rows} 共 {cols * rows} 个内角点。'
+                             '请让棋盘格完整入镜并避免遮挡或反光。')
+        pose, _, quality = checked_board_pnp(self.board, pixels, self.k, self.d, self.options)
+        if pose is None:
+            raise ValueError(quality["reason"])
+        if records:
+            previous = np.asarray(records[-1]['board_rotation'])
+            flipped = pose @ board_halfturn(self.board)
+            if np.trace(previous.T @ flipped[:3, :3]) > np.trace(previous.T @ pose[:3, :3]):
+                pose = flipped
+        return pose
+
+    def measure(self, image, detector):
+        records = self.records(self.index)
+        pose = self.board_pose(image, records)
         corners, _ = detect(image, detector)
         visible = {mid: corners[mid] for mid in sorted(self.ids & corners.keys())}
         if len(visible) < 2:
@@ -122,21 +146,6 @@ class CaptureGroups:
             raise ValueError(f'Keep an overlap marker visible from {status["previous"]}')
         if not self.index and self.reference not in visible:
             raise ValueError(f'Show top ID {self.reference} together with a side marker in group 1')
-        found, pixels, *_ = detect_checkerboard_realtime(prepare_gray8(image), self.pattern)
-        if not found:
-            raise ValueError('Show the full checkerboard and target in the same frame')
-        pixels = pixels.reshape(-1, 2)
-        pose = pnp(self.board, pixels, self.k, self.d)
-        records = self.records(self.index)
-        if records:
-            previous = np.asarray(records[-1]['board_rotation'])
-            halfturn = np.diag([-1.0, -1.0, 1.0])
-            if np.trace(previous.T @ pose[:3, :3] @ halfturn) > np.trace(previous.T @ pose[:3, :3]):
-                pixels = pixels[::-1].copy()
-                pose = pnp(self.board, pixels, self.k, self.d)
-        delta = project(self.board, pose, self.k, self.d) - pixels
-        if np.sqrt(np.mean(np.sum(delta**2, axis=1))) > self.options['max_observation_rmse_px']:
-            raise ValueError('Checkerboard reprojection error too high. Hold the camera steady')
         centers = np.array([points.mean(axis=0) for points in visible.values()])
         xy = cv2.undistortPoints(centers.reshape(-1, 1, 2), self.k, self.d).reshape(-1, 2)
         rays = np.c_[xy, np.ones(len(xy))] @ pose[:3, :3]
@@ -171,6 +180,62 @@ class CaptureGroups:
             'camera_position': position.tolist(),
             'corner_rays': {mid: rays.tolist() for mid, rays in corner_rays.items()},
         }
+
+    def triangulate_markers(self, records):
+        key = self.index, len(records)
+        if key == self.center_cache_key:
+            return self.triangulated_corners
+        coverage = self.coverage(self.index)
+        markers = {}
+        for mid, (count, _, angle) in coverage.items():
+            if count < 3 or angle < self.options['min_view_angle_deg']:
+                continue
+            observations = [record for record in records if record['split'] == 'train'
+                            and str(mid) in record.get('corner_rays', {})]
+            if len(observations) < 3:
+                continue
+            rays = np.asarray([record['corner_rays'][str(mid)] for record in observations])
+            cameras = np.asarray([record['camera_position'] for record in observations])
+            rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
+            perpendicular = np.eye(3) - rays[..., :, None] * rays[..., None, :]
+            lhs = perpendicular.sum(axis=0)
+            rhs = np.einsum('ncij,nj->ci', perpendicular, cameras)
+            try:
+                corners = np.linalg.solve(lhs, rhs[..., None])[..., 0]
+            except np.linalg.LinAlgError:
+                continue
+            if np.all(np.sum((corners[None, ...] - cameras[:, None, :]) * rays, axis=-1) > 0):
+                markers[mid] = corners
+        self.center_cache_key = key
+        self.triangulated_corners = markers
+        return markers
+
+    def live_distances(self, image, preview, corners):
+        from .checkerboard import project
+
+        ids = sorted(self.ids & corners.keys())
+        distances = dict.fromkeys(ids)
+        records = self.records(self.index)
+        markers = self.triangulate_markers(records)
+        ready = [mid for mid in ids if mid in markers]
+        if ready:
+            try:
+                pose = self.board_pose(image, records)
+            except (ValueError, cv2.error):
+                return {'status': 'board_unavailable', 'mm': distances}
+            position = -pose[:3, :3].T @ pose[:3, 3]
+            scale = np.asarray(image.shape[1::-1]) / np.asarray(preview.shape[1::-1])
+            for mid in ready:
+                points = markers[mid]
+                if np.any((points @ pose[:3, :3].T + pose[:3, 3])[:, 2] <= 0):
+                    continue
+                prediction = project(points, pose, self.k, self.d)
+                observed = (corners[mid] + 0.5) * scale - 0.5
+                rmse = np.sqrt(np.mean(np.sum((prediction - observed)**2, axis=1)))
+                if rmse <= 2 * self.options['max_validation_rmse_px']:
+                    distances[mid] = float(np.linalg.norm(points.mean(axis=0) - position))
+        return {'status': 'ok' if any(v is not None for v in distances.values()) else 'unavailable',
+                'mm': distances}
 
 
 def live_preview(image, detector, max_dimension=1200, label_state=None):
@@ -245,8 +310,16 @@ def _capture_session(config, session, camera, resume, view):
             raise ValueError('Resume requires an existing grouped capture with the same marker and checkerboard settings')
         metadata.setdefault('capture_group', 0)
         groups = CaptureGroups(config['marker'], config['calibration'], metadata, camera)
+        if resume:
+            short = [i + 1 for i in range(groups.index)
+                     if len(groups.records(i)) < groups.options['min_group_views']]
+            if short:
+                raise ValueError(f'已结束的组 {short} 未达到每组 {groups.options["min_group_views"]} 张有效图，请新建会话采集。')
         view.group_status = groups.status()
+        metadata['capture_complete'] = view.group_status['complete']
         view.log(f'Group {groups.index + 1}: keep board and target still, move camera. '
+                 f'At least {groups.options["min_groups"]} groups and '
+                 f'{groups.options["min_group_views"]} accepted images per group. '
                  f'Each qualified ID needs {groups.options["min_marker_views"]} training shots, '
                  f'one held-out shot and {groups.options["min_view_angle_deg"]:g} deg of viewing spread.')
         if resume:
@@ -297,10 +370,13 @@ def _capture_session(config, session, camera, resume, view):
         view.open_window(title, 1100, 1000)
         started = time.monotonic()
         last_frame = started
+        next_distance_update = started
         while True:
             if view.finish.is_set():
                 break
             if not view.prepare(adapters, open_camera):
+                view.marker_distances = None
+                next_distance_update = 0
                 last_frame = time.monotonic()
                 time.sleep(0.05)
                 continue
@@ -320,13 +396,23 @@ def _capture_session(config, session, camera, resume, view):
                      f'Preview IDs: {sorted(corners)}', f'Observed IDs: {dict(sorted(seen.items()))}']
             if groups:
                 status = view.group_status
+                if last_frame >= next_distance_update:
+                    view.marker_distances = groups.live_distances(image, preview, corners)
+                    next_distance_update = last_frame + 0.5
                 lines += [
-                    f'Group {status["group"]}: {status["images"]} saved   Ready IDs: {status["qualified"]}',
+                    f'Group {status["group"]}: {status["images"]} saved   Ready groups: '
+                    f'{status["ready_groups"]}/{status["minimum_groups"]}',
                     f'Missing overall: {status["missing"]}   Bridge IDs: {status["bridge"]}',
                     'N: next group, then move target' if status['ready'] else
                     (f'Show top {groups.reference} + side' if not groups.index else
                      f'Keep overlap with earlier groups: {status["previous"]}'),
                 ]
+                if not view.web and view.marker_distances['mm']:
+                    ranges = [f'{mid} ~{mm:.0f}' if mm is not None else f'{mid} --'
+                              for mid, mm in view.marker_distances['mm'].items()]
+                    lines.append('Marker range (mm): ' + ' / '.join(ranges))
+                if not view.web and view.marker_save_feedback and not view.marker_save_feedback['saved']:
+                    lines.append('Last shot rejected. See terminal for reason.')
                 for mid, (train, test, angle) in groups.coverage(groups.index).items():
                     lines.append(f'{mid}: train {train}, holdout {test}, spread {angle:.1f} deg')
             if duplicates:
@@ -343,6 +429,10 @@ def _capture_session(config, session, camera, resume, view):
                     continue
                 metadata['capture_group'] += 1
                 view.group_status = groups.status()
+                metadata['capture_complete'] = view.group_status['complete']
+                view.marker_distances = None
+                view.marker_save_feedback = None
+                next_distance_update = 0
                 write_json(session / 'capture_metadata.json', metadata)
                 view.log(f'Group {groups.index + 1} opened. Reposition the target now, then keep it still. '
                          f'Keep an overlap ID from {view.group_status["previous"]}.')
@@ -353,8 +443,10 @@ def _capture_session(config, session, camera, resume, view):
                 if groups:
                     try:
                         record = groups.measure(image, detector)
-                    except ValueError as error:
-                        view.log(f'Frame skipped. {error}')
+                    except (ValueError, cv2.error) as error:
+                        message = f'未保存当前帧。{error}'
+                        view.marker_save_feedback = {'saved': False, 'message': message}
+                        view.log(message)
                         continue
                 else:
                     record = {'ids': sorted(visible), 'ids_source': 'preview'}
@@ -373,6 +465,8 @@ def _capture_session(config, session, camera, resume, view):
                     view.group_status = groups.status()
                     metadata['capture_complete'] = view.group_status['complete']
                 write_json(session / 'capture_metadata.json', metadata)
+                if groups:
+                    view.marker_save_feedback = {'saved': True, 'message': f'已保存 {relative}'}
                 view.log(f'Saved {relative}: IDs={record["ids"]}; counts={dict(sorted(seen.items()))}')
                 if groups:
                     status = view.group_status

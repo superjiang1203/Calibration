@@ -230,8 +230,10 @@ class PlanarJointProblem(b.JointProblem):
                 mid: b.transform(placements[r["group"], self.owner[mid]], world[mid])
                 for mid in ids
             }
-            points = np.concatenate([self.board, *[placed[mid] for mid in ids]])
-            measured = np.concatenate([r["board"], *[r["markers"][mid] for mid in ids]])
+            board_inliers = r.get("board_inliers", slice(None))
+            board_points = self.board[board_inliers]
+            points = np.concatenate([board_points, *[placed[mid] for mid in ids]])
+            measured = np.concatenate([r["board"][board_inliers], *[r["markers"][mid] for mid in ids]])
             pixels, jac = cv2.projectPoints(
                 points, b.vector(camera)[:3], camera[:3, 3], self.k, self.d
             )
@@ -239,7 +241,7 @@ class PlanarJointProblem(b.JointProblem):
             if i in self.camera_slices:
                 add(offset, self.camera_slices[i], jac[:, :6])
             jp = jac[:, 3:6].reshape(-1, 2, 3)
-            begin = len(self.board)
+            begin = len(board_points)
             for mid in ids:
                 key = (r["group"], self.owner[mid])
                 placement = placements[key]

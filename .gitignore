@@ -2,6 +2,7 @@
 /data/
 /output/
 /configs/ssh.local.json
+/configs/studio.local/
 
 # Keep only packaged SDKs and their documentation
 /thirdparty/*

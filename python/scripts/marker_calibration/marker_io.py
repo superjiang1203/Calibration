@@ -17,8 +17,8 @@ from ..workflow.config import PROJECT_ROOT, validate_sensor_profile
 
 DEFAULT_CONFIG = PROJECT_ROOT / 'configs' / 'markers' / 'double_cube.json'
 DEFAULT_OPTIONS = {
-    'min_views': 15, 'min_marker_views': 5, 'min_pair_views': 3,
-    'validation_stride': 5, 'max_pnp_rmse_px': 3.0,
+    'min_views': 15, 'min_group_views': 10, 'min_groups': 5, 'min_marker_views': 5, 'min_pair_views': 3,
+    'validation_stride': 5, 'max_pnp_rmse_px': 3.0, 'max_board_pnp_rmse_px': 2.0,
     'vote_translation_ratio': 0.5, 'vote_rotation_deg': 25.0,
     'loss_scale_px': 1.0, 'max_observation_rmse_px': 2.0,
     'max_validation_rmse_px': 3.0, 'max_outlier_fraction': 0.2,
@@ -98,11 +98,13 @@ def load_config(path):
     for key, value in options.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value) or value <= 0:
             raise ValueError(f'{key} must be positive and finite')
-    for key in ('min_views', 'min_marker_views', 'min_pair_views', 'validation_stride', 'max_nfev'):
+    for key in ('min_views', 'min_group_views', 'min_groups', 'min_marker_views', 'min_pair_views', 'validation_stride', 'max_nfev'):
         if type(options[key]) is not int:
             raise ValueError(f'{key} must be an integer')
     if options['validation_stride'] < 2 or options['min_views'] < 3 or options['min_marker_views'] < 3 or options['min_pair_views'] < 2:
         raise ValueError('Insufficient coverage or validation settings')
+    if options['min_group_views'] < max(4, options['validation_stride']):
+        raise ValueError('min_group_views must allow training and at least one held-out view')
     if not 0 < options['min_length_ratio'] < 1 < options['max_length_ratio'] or options['max_outlier_fraction'] >= 0.5:
         raise ValueError('Invalid length bounds or outlier fraction')
     output = config['output']
@@ -323,7 +325,7 @@ GeometryDumper.add_representer(FlowSequence, lambda dumper, values: dumper.repre
 
 def save_geometry(path, geometry, lengths, reference, config, *,
                   optimization_method='pnp_voting_independent_square_ba',
-                  reference_marker_length_fixed=True):
+                  reference_marker_length_fixed=True, dimensions=None):
     document = {'schema_version': 1, 'instrument': dict(config['output']['instrument']),
                 'marker_positions': {mid: [FlowSequence(float(v) for v in point) for point in geometry[mid]] for mid in sorted(geometry)},
                 'tip_offset': FlowSequence(config['output']['tip_offset']),
@@ -334,6 +336,11 @@ def save_geometry(path, geometry, lengths, reference, config, *,
                 'scale_source': config['marker']['length_source'],
                 'reference_marker_length_fixed': bool(reference_marker_length_fixed),
                 'tip_offset_source': 'configured_not_calibrated'}
+    if dimensions is not None:
+        document['marker_dimensions_mm'] = {
+            mid: {axis: float(dimensions[mid][axis]) for axis in ('width', 'height')}
+            for mid in sorted(geometry)
+        }
     if config['marker'].get('geometry_model') == 'rectangle' and optimization_method == 'pnp_voting_independent_rectangle_ba':
         document['reference_marker_width_mm'] = float(config['marker']['reference_marker_length_mm'])
     temporary = path.with_name(f'.{path.stem}.{uuid.uuid4().hex}{path.suffix}')

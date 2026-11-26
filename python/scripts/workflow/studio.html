@@ -103,7 +103,7 @@ const sensorActions = [
 const modes = {
     galaxy: {
         help: '打开 Galaxy 预览后，在页面内连接相机、调节曝光与增益，也可以保存原图。',
-        fields: ['preset'], actions: [['capture', '打开 Galaxy 预览']]
+        fields: ['preset', 'geometry', 'intrinsics'], actions: [['capture', '打开 Galaxy 预览']]
     },
     intrinsics: {
         help: '用棋盘图像估计单相机内参，也可用已有会话标定或复核。',
@@ -132,7 +132,7 @@ const modes = {
     },
     vcamera: {
         help: '打开图漾 RGB 实时预览，也可以枚举设备、检查控制项或保存测试帧。',
-        fields: ['preset', 'frame'], actions: [
+        fields: ['preset', 'geometry', 'frame'], actions: [
             ['capture', '打开 RGB 预览'], ['devices', '枚举设备'], ['inspect', '检查设备'], ['frame', '保存测试帧', 'frame']
         ]
     }
@@ -143,6 +143,15 @@ let busy = false;
 let actionError = '';
 let exiting = false;
 const values = Object.fromEntries(Object.keys(modes).map(mode => [mode, {}]));
+function saveRecentPath(mode, key, value) {
+    fetch('/recent-path', {
+        method: 'POST', keepalive: true,
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mode, key, value})
+    }).then(response => {
+        if (!response.ok) throw new Error('save');
+    }).catch(() => { byId('status').textContent = '保存上次使用的文件路径失败。'; });
+}
 let galaxyIntrinsicsPreset = 'configs/intrinsics/galaxy.json';
 function renderPanel() {
     const mode = modes[selected];
@@ -163,7 +172,10 @@ function renderPanel() {
         const [title, hint] = inputs[key];
         const label = document.createElement('label');
         const field = document.createElement(key === 'camera' ? 'select' : 'input');
-        label.append(title, field);
+        const previewTracking = ['galaxy', 'vcamera'].includes(selected);
+        const trackingTitle = key === 'geometry' ? 'Marker 几何或末端 YAML（执行主机，可选）'
+            : key === 'intrinsics' ? '追踪用相机内参 YAML（执行主机）' : title;
+        label.append(previewTracking ? trackingTitle : title, field);
         if (key === 'camera') {
             const defaultName = ['marker', 'pivot'].includes(selected) ? '使用任务配置' : 'Galaxy 灰度';
             field.add(new Option(defaultName, ''));
@@ -173,6 +185,10 @@ function renderPanel() {
             field.placeholder = hint;
         }
         field.value = values[selected][key] || '';
+        if (key !== 'camera') {
+            const mode = selected;
+            field.addEventListener('change', () => saveRecentPath(mode, key, field.value));
+        }
         field.addEventListener('input', () => {
             values[selected][key] = field.value;
             if (key === 'camera') {
@@ -198,7 +214,12 @@ function renderPanel() {
             const payload = {command};
             if (selectedCamera && (overrideCapture || factoryMode || selected === 'imu')) payload.camera = selectedCamera;
             const usePreset = mode.fields.includes('preset') && command !== 'devices';
-            for (const key of (usePreset ? [...required, 'preset'] : required)) {
+            const optional = usePreset ? ['preset'] : [];
+            if (command === 'capture' && ['galaxy', 'vcamera'].includes(selected)) {
+                optional.push('geometry');
+                if (selected === 'galaxy') optional.push('intrinsics');
+            }
+            for (const key of [...required, ...optional]) {
                 const value = values[selected][key]?.trim();
                 if (value) payload[key] = value;
             }
@@ -307,12 +328,14 @@ async function refresh() {
         if (state.url && workspace.getAttribute('src') !== state.url) workspace.src = state.url;
         if (!state.url && workspace.hasAttribute('src')) workspace.removeAttribute('src');
         workspace.hidden = !state.url;
+        const markerError = state.mode === 'marker' && state.exit_code
+            ? state.logs.slice().reverse().find(line => line.startsWith('Error: '))?.slice(7) : '';
         byId('status').textContent = actionError || (state.running
             ? name + (state.phase === 'solve' ? '正在处理已有数据…' : state.url ? '运行中。' : '正在启动…')
             : state.phase === 'paused' ? '已保存采集进度，可继续采集。'
             : state.phase === 'switched' ? '已结束上一项任务，可启动所选页签。'
             : state.exit_code === null ? '等待开始任务。'
-            : name + (state.exit_code === 0 ? '已完成。' : '未完成，请查看任务日志。'));
+            : markerError || name + (state.exit_code === 0 ? '已完成。' : '未完成，请查看任务日志。'));
         byId('paths').hidden = !state.session && !state.result;
         byId('sessionPath').textContent = state.session || '—';
         byId('resultPath').textContent = state.result || '—';
@@ -331,9 +354,10 @@ async function refresh() {
 }
 
 renderPanel();
-fetch('/presets').then(response => response.json()).then(({target, presets}) => {
+fetch('/presets').then(response => response.json()).then(({target, presets, recent_paths}) => {
     byId('target').textContent = target;
     for (const mode of Object.keys(modes)) {
+        Object.assign(values[mode], recent_paths?.[mode]);
         const preset = presets[mode];
         if (typeof preset === 'string') values[mode].preset ??= preset;
     }

@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="verify 读取内参和外参 YAML 的结果目录")
     parser.add_argument("--camera", choices=("galaxy", "vcamera"), help="Marker 或竖轴采集使用的相机")
     parser.add_argument("--camera-intrinsics", type=Path, help="所选相机的内参 YAML")
+    parser.add_argument("--tracking-geometry", type=Path)
+    parser.add_argument("--tracking-intrinsics", type=Path)
     add_target_arguments(parser, PROJECT_ROOT)
     return parser
 
@@ -105,6 +107,12 @@ def main(argv=None) -> int:
         if not isinstance(configured, dict):
             raise ValueError("Workflow configuration must be a JSON object")
         configured_mode = configured.get("mode")
+        if (args.tracking_geometry or args.tracking_intrinsics) and (
+            args.command != "capture" or configured.get("sensor_type") not in ("galaxy", "vcamera")
+            or not args.tracking_geometry
+            or bool(args.tracking_intrinsics) != (configured["sensor_type"] == "galaxy")
+        ):
+            raise ValueError("Tracking requires a Galaxy or Vcamera preview and a geometry YAML. Galaxy also requires intrinsics.")
         if args.camera and configured_mode not in ("marker_geometry", "marker_pivot"):
             raise ValueError("相机切换用于 Marker 几何和竖轴采集。其他标定使用任务配置的传感器组合。")
         if configured_mode == "marker_pivot":
@@ -134,6 +142,13 @@ def main(argv=None) -> int:
             raise ValueError("detect requires a marker_geometry configuration")
         direct_preview = args.command == "capture" and "sensor_type" in configured
         config = load_preview_config(config_path, configured) if direct_preview else load_config(config_path)
+        if args.tracking_geometry:
+            from ..marker_calibration.live_tracking import LiveTracking
+
+            config["live_tracking"] = LiveTracking(
+                session_path(args.tracking_geometry),
+                session_path(args.tracking_intrinsics) if args.tracking_intrinsics else None,
+            )
         if args.command in ("calibrate", "verify"):
             session = session_path(args.session)
             if not session.is_dir():

@@ -27,25 +27,36 @@ MIN_AREA_RATIO = 0.25
 
 
 def calibrate_rectangles(views, ids, marker, camera, options, output):
-    """Redetect full-resolution checkerboard corners for every capture group."""
-    from ..sensor_intrinsics.detection import detect_checkerboard_realtime, prepare_gray8
-
+    """Filter complete checkerboards by pose quality before fitting any geometry."""
     spec = marker["checkerboard"]
     pattern = (spec["pattern_cols"], spec["pattern_rows"])
     board = b.object_board(pattern, spec["square_size_mm"])
-    frames, missing_board = [], []
+    k, d = camera["matrix"], camera["distortion"]
+    frames, missing_board, rejected_pnp, accepted_pnp = [], [], [], []
     for view in views:
         image = cv2.imdecode(np.fromfile(view["image"], np.uint8), cv2.IMREAD_UNCHANGED)
-        found, pixels, *_ = detect_checkerboard_realtime(prepare_gray8(image), pattern)
-        if found:
-            frames.append(dict(view, board=pixels.reshape(-1, 2)))
-        else:
+        pixels = b.detect_full_board(image, pattern)
+        if pixels is None:
             missing_board.append(view["image"])
+            continue
+        pose, inliers, quality = b.checked_board_pnp(board, pixels, k, d, options)
+        observation = {"image": view["image"], "group": view.get("group", 0),
+                       "capture_split": view.get("split"), **quality}
+        if pose is None:
+            rejected_pnp.append(observation)
+            continue
+        accepted_pnp.append(observation)
+        frames.append(dict(view, board=pixels, camera=pose, board_inliers=inliers))
     b.write_json(output / "checkerboard_observations.json", {
         "checkerboard": spec, "joint_image_count": len(frames),
         "group_image_counts": dict(Counter(frame.get("group", 0) for frame in frames)),
         "marker_images_without_checkerboard": missing_board,
+        "accepted_board_pnp": accepted_pnp,
+        "rejected_board_pnp": rejected_pnp,
     })
+    print(f'棋盘 PnP 筛选保留 {len(frames)}/{len(views)} 张。'
+          f'棋盘角点不完整 {len(missing_board)} 张，PnP 未通过 {len(rejected_pnp)} 张。'
+          '详见 checkerboard_observations.json。', flush=True)
     return fit_rectangles(frames, ids, marker, board, camera, options, output)
 
 
@@ -55,27 +66,53 @@ def fit_rectangles(views, ids, marker, board, camera, options, output):
 
     reference = marker["reference_marker_id"]
     k, d = camera["matrix"], camera["distortion"]
-    frames = []
-    group_counts = Counter()
+    frames, dropped, rejected = [], [], []
+    target_ids = set(ids)
+    seen_per_group = Counter()
+    minimum_codes = 2
+    limit = options["max_observation_rmse_px"]
     for view in views:
         group = view.get("group", 0)
-        group_counts[group] += 1
-        default_split = "test" if group_counts[group] % options["validation_stride"] == 0 else "train"
-        frames.append(dict(view, group=group, markers=view["corners"],
-                           split=view.get("split", default_split)))
+        seen_per_group[group] += 1
+        default_split = "test" if seen_per_group[group] % options["validation_stride"] == 0 else "train"
+        split = view.get("split", default_split)
+        corners = {mid: points for mid, points in view["corners"].items() if mid in target_ids}
+        if len(corners) < minimum_codes:
+            dropped.append({"image": view["image"], "group": group, "split": split,
+                            "remaining_ids": sorted(corners), "reason": "too_few_detected_target_ids"})
+            continue
+        frames.append(dict(view, group=group, corners=corners, markers=corners, split=split))
     train = [frame for frame in frames if frame["split"] == "train"]
     test = [frame for frame in frames if frame["split"] == "test"]
-    if not test:
-        raise ValueError("Capture more frames containing both the checkerboard and target")
-    connectivity_views = []
-    for group in group_counts:
-        group_train = [frame for frame in train if frame["group"] == group]
-        if len(group_train) < 3 or not any(frame["group"] == group for frame in test):
-            raise ValueError(f"Group {group + 1} needs at least three training images and one held-out image with both target and checkerboard")
-        counts = Counter(mid for frame in group_train for mid in frame["markers"])
-        connectivity_views.append({"corners": {mid for mid, count in counts.items() if count >= 3}})
-    check_coverage(train, ids, reference, options, connectivity_views=connectivity_views)
-    b.orient_boards(frames, board, k, d)
+    initial_training_observations = sum(len(frame["markers"]) for frame in train)
+
+    def check_retained_coverage():
+        counts = Counter(frame["group"] for frame in train + test)
+        b.write_json(output / "marker_filter.json", {
+            "min_target_ids_per_frame": minimum_codes, "training_marker_rmse_limit_px": limit,
+            "initial_training_observations": initial_training_observations,
+            "retained_training_observations": sum(len(frame["markers"]) for frame in train),
+            "retained_group_image_counts": dict(counts),
+            "rejected_training_markers": rejected, "dropped_frames": dropped,
+        })
+        if len(counts) < options["min_groups"]:
+            raise ValueError(f'筛选后剩余 {len(counts)} 组，至少需要 {options["min_groups"]} 组。'
+                             '详见 checkerboard_observations.json 和 marker_filter.json。')
+        connectivity_views = []
+        for group, count in counts.items():
+            if count < options["min_group_views"]:
+                raise ValueError(f'筛选后第 {group + 1} 组剩余 {count} 张有效图，'
+                                 f'至少需要 {options["min_group_views"]} 张。详见 marker_filter.json。')
+            group_train = [frame for frame in train if frame["group"] == group]
+            if len(group_train) < 3 or not any(frame["group"] == group for frame in test):
+                raise ValueError(f"筛选后第 {group + 1} 组需要至少 3 张训练图和 1 张留出图。")
+            observed = Counter(mid for frame in group_train for mid in frame["markers"])
+            connectivity_views.append({"corners": {mid for mid, count in observed.items() if count >= 3}})
+        check_coverage(train, ids, reference, options, connectivity_views=connectivity_views)
+        return counts
+
+    group_counts = check_retained_coverage()
+    b.orient_boards(frames, board, k, d, poses_estimated=True)
     tools = {"C": ids}
     poses, lengths, placements, _ = b.init_geometry(train, tools, k, d, output)
     anchor = poses[reference]
@@ -83,22 +120,55 @@ def fit_rectangles(views, ids, marker, board, camera, options, output):
     poses = {mid: inverse @ pose for mid, pose in poses.items()}
     placements = {key: pose @ anchor for key, pose in placements.items()}
     shapes = {mid: np.log([length, length]) for mid, length in lengths.items()}
-    problem = PlanarJointProblem(
-        train, tools, {"C": reference}, poses, shapes, placements, board, k, d,
-        True, rectangular=True,
-    )
-    (poses, shapes, placements, cameras), stage = problem.solve(options["max_nfev"])
-    points = {mid: b.transform(poses[mid], rectangle_shape(shape)) for mid, shape in shapes.items()}
+    stages = []
+    while True:
+        problem = PlanarJointProblem(
+            train, tools, {"C": reference}, poses, shapes, placements, board, k, d,
+            True, rectangular=True,
+        )
+        (poses, shapes, placements, cameras), stage = problem.solve(options["max_nfev"])
+        stages.append(stage)
+        points = {mid: b.transform(poses[mid], rectangle_shape(shape)) for mid, shape in shapes.items()}
+        camera_map = {frame["image"]: pose for frame, pose in zip(train, cameras)}
+        training = errors(train, points, placements, k, d, camera_map)
+        bad = [r for r in training if r["rmse_px"] > limit or not r["positive_depth"]]
+        if not stage["success"] or not bad:
+            break
+
+        bad_by_image = {}
+        for r in bad:
+            reason = "rmse_over_limit" if r["positive_depth"] else "nonpositive_depth"
+            rejected.append({**r, "iteration": len(stages), "reason": reason})
+            bad_by_image.setdefault(r["image"], set()).add(r["id"])
+        retained = []
+        for frame in train:
+            image = frame["image"]
+            bad_ids = bad_by_image.get(image, set())
+            corners = {mid: points for mid, points in frame["markers"].items() if mid not in bad_ids}
+            if len(corners) < minimum_codes:
+                dropped.append({"image": image, "group": frame["group"], "split": "train",
+                                "remaining_ids": sorted(corners), "reason": "too_few_ids_after_filtering"})
+                continue
+            retained.append(dict(frame, corners=corners, markers=corners, camera=camera_map[image]))
+        removed_frames = len(train) - len(retained)
+        train = retained
+        print(f'训练码筛选第 {len(stages)} 轮剔除 {len(bad)} 条不合格观测，'
+              f'{removed_frames} 张图因有效码不足被剔除。详见 marker_filter.json。', flush=True)
+        group_counts = check_retained_coverage()
     dimensions = {mid: dict(zip(("width", "height"), np.exp(shape).tolist())) for mid, shape in shapes.items()}
     lengths = {mid: (size["width"] + size["height"]) / 2 for mid, size in dimensions.items()}
-    camera_map = {frame["image"]: pose for frame, pose in zip(train, cameras)}
-    training = errors(train, points, placements, k, d, camera_map)
     validation = errors(test, points, placements, k, d)
     board_residuals = []
-    for frame in frames:
+    for frame in train + test:
         pose = camera_map.get(frame["image"], frame["camera"])
         delta = b.project(board, pose, k, d) - frame["board"]
-        board_residuals.append(float(np.sqrt(np.mean(np.sum(delta**2, axis=1)))))
+        squared = np.sum(delta**2, axis=1)
+        board_residuals.append({
+            "image": frame["image"], "group": frame["group"], "split": frame["split"],
+            "rmse_px": float(np.sqrt(np.mean(squared[frame["board_inliers"]]))),
+            "all_corners_rmse_px": float(np.sqrt(np.mean(squared))),
+        })
+    worst_board = max(board_residuals, key=lambda observation: observation["rmse_px"])
     angles = {}
     for mid in ids:
         directions = []
@@ -114,7 +184,7 @@ def fit_rectangles(views, ids, marker, board, camera, options, output):
         "training_reprojection": all(r["rmse_px"] <= options["max_observation_rmse_px"] for r in training),
         "validation_reprojection": all(r["rmse_px"] <= options["max_validation_rmse_px"] for r in validation),
         "validation_marker_coverage": {r["id"] for r in validation} == set(ids),
-        "checkerboard_reprojection": max(board_residuals) <= options["max_observation_rmse_px"],
+        "checkerboard_reprojection": worst_board["rmse_px"] <= options["max_observation_rmse_px"],
         "positive_depth": all(r["positive_depth"] for r in training + validation),
         "viewing_diversity": all(angle >= options["min_view_angle_deg"] for angle in angles.values()),
         "dimension_bounds_inactive": all(2.002 < value < 59.94 for size in dimensions.values() for value in size.values()),
@@ -123,11 +193,14 @@ def fit_rectangles(views, ids, marker, board, camera, options, output):
         "passed": all(checks.values()), "checks": checks, "geometry_model": "rectangle",
         "reference_marker_id": reference, "reference_marker_length_fixed": False,
         "checkerboard": marker["checkerboard"], "marker_dimensions_mm": dimensions,
-        "maximum_checkerboard_rmse_px": max(board_residuals), "view_angle_range_deg": angles,
+        "maximum_checkerboard_rmse_px": worst_board["rmse_px"],
+        "checkerboard_observations": board_residuals, "view_angle_range_deg": angles,
         "training_image_count": len(train), "validation_image_count": len(test),
         "groups": {group: {"images": count, "target_to_board": placements[group, "C"].tolist()}
                    for group, count in group_counts.items()},
-        "stages": {"rectangle_joint_ba": stage},
+        "stages": {"rectangle_joint_ba": stage, "rectangle_fit_passes": stages},
+        "marker_filter": {"rejected_training_marker_count": len(rejected),
+                          "dropped_frame_count": len(dropped), "details": "marker_filter.json"},
         "training_observations": training, "validation_observations": validation,
     }
     return points, lengths, reference, report

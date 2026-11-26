@@ -133,6 +133,8 @@ def run_workflow(args, root, *, marker=False):
         ("--session", args.session),
         ("--calibration-dir", getattr(args, "calibration_dir", None)),
         ("--camera-intrinsics", getattr(args, "camera_intrinsics", None)),
+        ("--tracking-geometry", getattr(args, "tracking_geometry", None)),
+        ("--tracking-intrinsics", getattr(args, "tracking_intrinsics", None)),
     ):
         if value is not None:
             command_args.extend((flag, remote_path(value, root)))

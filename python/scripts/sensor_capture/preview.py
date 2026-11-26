@@ -11,6 +11,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 import cv2
 
@@ -30,12 +31,22 @@ class CaptureView:
         self.images = {}
         self.frames = {}
         self.published = 0.0
+        self.next_preview = 0.0
+        self.preview_timing = None
         self.save = Event()
-        self.record = Event()
-        self.last_auto_save = float("-inf")
+        self.video_requested = Event()
+        self.video_directory = None
+        self.video_writer = None
+        self.video_path = None
+        self.video_temporary = None
+        self.video_previous = None
+        self.video_start = 0.0
+        self.video_frames = 0
         self.finish = Event()
         self.next_group = Event()
         self.group_status = None
+        self.marker_distances = None
+        self.marker_save_feedback = None
         self.server = None
         self.requests = Queue()
         self.lock = Lock()
@@ -72,14 +83,19 @@ class CaptureView:
                 pass
 
             def do_GET(self):
+                revision = None
                 if self.path == "/":
                     content, kind = page, "text/html; charset=utf-8"
                 elif self.path == "/image_zoom.js":
                     content, kind = zoom_script, "text/javascript; charset=utf-8"
                 elif self.path.partition("?")[0] == "/frame.jpg":
-                    name = parse_qs(urlsplit(self.path).query).get("camera", [None])[0]
-                    frames = view.frames
+                    query = parse_qs(urlsplit(self.path).query)
+                    name = query.get("camera", [None])[0]
+                    with view.lock:
+                        frames, revision = view.frames, str(view.published)
                     content = frames.get(name) if name is not None else next(iter(frames.values()), None)
+                    if query.get("after", [None])[0] == revision:
+                        content = None
                     kind = "image/jpeg"
                 elif self.path == "/status":
                     with view.lock:
@@ -87,12 +103,17 @@ class CaptureView:
                             state=view.state,
                             logs=list(view.logs),
                             controls=view.controls,
-                            recording=view.record.is_set(),
+                            video_enabled=view.video_directory is not None,
+                            video_recording=view.video_writer is not None,
+                            video_requested=view.video_requested.is_set(),
                             has_frame=bool(view.frames),
                             cameras=list(view.frames),
                             camera_slots=view.camera_slots,
                             frame_revision=view.published,
+                            preview_timing=view.preview_timing,
                             group=view.group_status,
+                            marker_distances=view.marker_distances,
+                            marker_save_feedback=view.marker_save_feedback,
                             title=view.title,
                             devices=dict(view.device_states),
                             can_save=view.can_save(),
@@ -109,6 +130,8 @@ class CaptureView:
                 self.send_response(200 if content else 204)
                 self.send_header("Content-Type", kind)
                 self.send_header("Cache-Control", "no-store")
+                if revision is not None:
+                    self.send_header("X-Frame-Revision", revision)
                 self.end_headers()
                 if content:
                     self.wfile.write(content)
@@ -159,28 +182,32 @@ class CaptureView:
                 if self.path not in (
                     "/save",
                     "/finish",
-                    "/record/start",
-                    "/record/stop",
                     "/group/next",
+                    "/video/start",
+                    "/video/stop",
                 ):
                     self.send_error(404)
                     return
-                if self.path in ("/save", "/record/start") and not view.can_save():
+                if self.path == "/save" and not view.can_save():
                     self.send_error(409, "Waiting for all required camera frames")
                     return
                 if self.path == "/group/next" and not (view.group_status and view.group_status["ready"]):
                     self.send_error(409, "Current group is incomplete")
                     return
-                if self.path == "/record/start" and view.group_status is not None:
-                    self.send_error(409, "Grouped capture uses individual shots")
+                if self.path.startswith("/video/"):
+                    if view.video_directory is None or (self.path == "/video/start" and not view.can_save()):
+                        self.send_error(409, "Video recording requires a ready camera preview")
+                        return
+                    if self.path == "/video/start":
+                        view.video_requested.set()
+                    else:
+                        view.video_requested.clear()
+                    self.send_response(204)
+                    self.end_headers()
                     return
                 self.send_response(204)
                 self.end_headers()
-                if self.path == "/record/start":
-                    view.record.set()
-                elif self.path == "/record/stop":
-                    view.record.clear()
-                elif self.path == "/group/next":
+                if self.path == "/group/next":
                     view.next_group.set()
                 else:
                     (view.save if self.path == "/save" else view.finish).set()
@@ -216,7 +243,6 @@ class CaptureView:
                 )
         elif action == "/disconnect" and adapters:
             self.state = "disconnecting"
-            self.record.clear()
             self.save.clear()
             with self.lock:
                 self.frames = {}
@@ -265,7 +291,7 @@ class CaptureView:
                     self.device_states[key] = "failed"
                     self.log(f"{key} 连接失败：{error}")
             elif action == "/disconnect" and current is not None:
-                self.record.clear()
+                self.stop_video()
                 self.save.clear()
                 self.pair_ready = False
                 adapters.remove(current)
@@ -329,9 +355,69 @@ class CaptureView:
             cv2.resizeWindow(title, width, height)
 
     def show(self, title, image):
+        if self.video_requested.is_set():
+            try:
+                self.write_video_frame(image)
+            except (OSError, RuntimeError, cv2.error) as error:
+                self.stop_video(save=False)
+                self.log(f"录像失败：{error}")
         self.images[title] = image if self.web else None
         if not self.web:
             cv2.imshow(title, image)
+
+    def write_video_frame(self, image):
+        fps = 20
+        now = time.monotonic()
+        width, height = image.shape[1::-1]
+        size = (width - width % 2, height - height % 2)
+        frame = image[:size[1], :size[0]]
+        if frame.ndim == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        frame = frame.copy(order="C")
+        if self.video_writer is None:
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"preview_{stamp}_{uuid4().hex[:8]}"
+            self.video_path = self.video_directory / f"{filename}.mp4"
+            self.video_temporary = self.video_directory / f"{filename}.partial.mp4"
+            writer = cv2.VideoWriter(str(self.video_temporary), cv2.VideoWriter_fourcc(*"mp4v"), fps, size)
+            if not writer.isOpened():
+                writer.release()
+                raise RuntimeError("无法创建 MP4 文件，请检查 OpenCV 视频后端和目录写入权限。")
+            self.video_writer = writer
+            self.video_start = now
+            self.video_frames = 0
+            self.video_previous = frame
+            self.log("已开始录制相机预览。")
+        if frame.shape != self.video_previous.shape:
+            self.stop_video()
+            self.log("画面分辨率变化，当前录像已结束。")
+            return
+        target = int((now - self.video_start) * fps)
+        while self.video_frames < target:
+            self.video_writer.write(self.video_previous)
+            self.video_frames += 1
+        if self.video_frames == target:
+            self.video_writer.write(frame)
+            self.video_frames += 1
+        self.video_previous = frame
+
+    def stop_video(self, *, save=True):
+        self.video_requested.clear()
+        writer, self.video_writer = self.video_writer, None
+        if writer is not None:
+            writer.release()
+        if self.video_temporary is None:
+            return
+        try:
+            if save and writer is not None:
+                self.video_temporary.replace(self.video_path)
+                self.log(f"MP4 已保存：{self.video_path}")
+            else:
+                self.video_temporary.unlink(missing_ok=True)
+        except OSError as error:
+            self.log(f"MP4 文件处理失败：{error}")
+        finally:
+            self.video_temporary = self.video_path = self.video_previous = None
 
     def key(self):
         if not self.web:
@@ -351,7 +437,9 @@ class CaptureView:
             self.next_group.clear()
             return ord("n")
         now = time.monotonic()
-        if self.images and now - self.published >= 0.15:
+        if self.images and now >= self.next_preview:
+            interval = 1 / 30
+            self.next_preview = max(now + interval / 2, self.next_preview + interval)
             frames = {}
             for name, image in self.images.items():
                 ok, jpeg = cv2.imencode(".jpg", image)
@@ -365,9 +453,5 @@ class CaptureView:
                     self.log("已收到首张预览图")
         if self.save.is_set():
             self.save.clear()
-            self.last_auto_save = now
-            return ord(" ")
-        if self.record.is_set() and self.images and now - self.last_auto_save >= 1.25:
-            self.last_auto_save = now
             return ord(" ")
         return -1

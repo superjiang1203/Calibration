@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -47,6 +48,11 @@ def _capture_session(config, session_path, view):
     view.camera_slots = [f"Sensor calibration: {label}" for label in labels]
     view.pair_ready = False
     failed = []
+    tracking = config.get('live_tracking')
+    tracking_error = None
+    arrivals = deque()
+    if view.web and config['mode'] == 'camera_preview' and len(labels) == 1:
+        view.video_directory = session
 
     def on_read_error(adapter, group, error):
         failed.append((adapter, group))
@@ -62,13 +68,21 @@ def _capture_session(config, session_path, view):
         if pattern:
             print('Stop the board and sensors before saving. For separate devices, exposure synchronization is not guaranteed.')
         while True:
+            if not view.video_requested.is_set() and view.video_writer is not None:
+                view.stop_video()
             if view.finish.is_set():
                 break
             if not view.prepare_sources(adapters, groups):
+                arrivals.clear()
+                view.preview_timing = None
                 time.sleep(0.05)
                 continue
             images, timestamps, synchronized = read_sources(
                 adapters, settings['timeout_ms'], on_error=on_read_error if view.web else None)
+            received = time.monotonic()
+            if not images:
+                arrivals.clear()
+                view.preview_timing = None
             for adapter, group in failed:
                 adapters.remove((adapter, group))
                 key = next(key for key, configured in groups.items() if group[0]["label"] == configured[0]["label"])
@@ -78,14 +92,13 @@ def _capture_session(config, session_path, view):
                 except Exception as error:
                     view.log(f'{key} 关闭失败：{error}')
             if failed:
+                view.stop_video()
                 view.refresh_controls(adapters)
                 failed.clear()
             view.pair_ready = all(label in images for label in labels)
             if view.pair_ready and synchronized:
                 delta_ms = abs(timestamps[labels[1]] - timestamps[labels[0]]) / 1000
                 view.pair_ready = delta_ms <= settings['max_pair_delta_ms']
-            if not view.pair_ready:
-                view.record.clear()
             metadata['capture_mode'] = ('single_camera' if not pattern else
                                         'synchronized_ir' if synchronized else 'static_board_sequential_reads')
             detected = {}
@@ -102,8 +115,29 @@ def _capture_session(config, session_path, view):
                     preview = np.zeros((200, 480), np.uint8)
                     cv2.putText(preview, 'No frame received', (15, 60), cv2.FONT_HERSHEY_SIMPLEX, .7, 255, 2)
                 elif not pattern:
+                    arrivals.append(received)
+                    while arrivals and arrivals[0] < received - 2:
+                        arrivals.popleft()
+                    acquisition_fps = ((len(arrivals) - 1) / (arrivals[-1] - arrivals[0])
+                                       if len(arrivals) > 1 and arrivals[-1] > arrivals[0] else None)
                     display = image if image.dtype == np.uint8 else prepare_gray8(image)
                     preview, _ = preview_image(display, settings['preview_max_width'], settings['preview_max_height'])
+                    tracking_ms = None
+                    if tracking:
+                        tracking_started = time.monotonic()
+                        try:
+                            preview = tracking.overlay(image, preview, adapters[0][0])
+                            tracking_error = None
+                            tracking_ms = (time.monotonic() - tracking_started) * 1000
+                        except (ValueError, KeyError, RuntimeError, cv2.error) as error:
+                            preview = tracking.with_hud(preview, ["Marker tracking unavailable; see camera log"])
+                            if str(error) != tracking_error:
+                                tracking_error = str(error)
+                                view.log(f'Marker 追踪无法叠加：{error}')
+                    view.preview_timing = {
+                        'acquisition_fps': acquisition_fps, 'tracking_ms': tracking_ms,
+                        'processing_ms': (time.monotonic() - received) * 1000,
+                    }
                 else:
                     gray = prepare_gray8(image)
                     found, corners, route, _, _ = detect_checkerboard_realtime(gray, pattern, max_dimension=config['calibration']['detect_max_dim'])
@@ -164,6 +198,7 @@ def _capture_session(config, session_path, view):
         if not (session / 'capture_metadata.json').exists():
             write_json(session / 'capture_metadata.json', metadata)
     finally:
+        view.stop_video()
         failures = []
         for adapter, _ in reversed(adapters):
             try:

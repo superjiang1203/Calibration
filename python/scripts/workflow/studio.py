@@ -1,6 +1,7 @@
 """One local browser workspace for camera capture, calibration and IMU preview."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
 from urllib.request import ProxyHandler, build_opener
+from uuid import uuid4
 
 from ..remote import add_target_arguments
 from .config import PROJECT_ROOT
@@ -29,6 +31,43 @@ COMMANDS = {
 }
 PREVIEW_PROFILES = {"galaxy": "configs/cameras/galaxy.json",
                     "vcamera": "configs/cameras/vcamera_color.json"}
+PATH_FIELDS = {"preset", "session", "calibration_dir", "geometry", "intrinsics",
+               "frame", "camera_intrinsics", "factory_output"}
+
+
+class RecentPaths:
+    def __init__(self, path):
+        self.path = path
+        self.lock = Lock()
+
+    def read(self):
+        try:
+            saved = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {
+            mode: {key: value for key, value in fields.items()
+                   if key in PATH_FIELDS and isinstance(value, str)}
+            for mode, fields in saved.items() if mode in COMMANDS and isinstance(fields, dict)
+        } if isinstance(saved, dict) else {}
+
+    def save(self, mode, key, value):
+        if (not isinstance(mode, str) or mode not in COMMANDS
+                or not isinstance(key, str) or key not in PATH_FIELDS or not isinstance(value, str)
+                or len(value) > 4096 or any(c in value for c in "\0\r\n")):
+            raise ValueError("文件路径设置无效")
+        with self.lock:
+            saved = self.read()
+            saved.setdefault(mode, {})[key] = value
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(f".{uuid4().hex}.tmp")
+            try:
+                temporary.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+                temporary.replace(self.path)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+
 class Studio:
     def __init__(self, args, config):
         self.args, self.config = args, config
@@ -101,8 +140,11 @@ class Studio:
                 raise ValueError("该操作不支持会话路径")
             if bool(calibration_dir) != (command == "verify"):
                 raise ValueError("复核需要指定标定结果目录")
-            if (mode != "imu" and (geometry or intrinsics)) or (mode == "imu" and preset):
+            tracking = mode in PREVIEW_PROFILES and command == "capture"
+            if (mode != "imu" and not tracking and (geometry or intrinsics)) or (mode == "imu" and preset):
                 raise ValueError("参数与当前模式不匹配")
+            if tracking and (bool(intrinsics) != (bool(geometry) and mode == "galaxy")):
+                raise ValueError("Galaxy 追踪需要几何 YAML 和内参 YAML。RGB 预览自动读取 SDK 内参。")
             if bool(frame) != (mode == "vcamera" and command == "frame"):
                 raise ValueError("保存测试帧需要指定 PNG 路径")
             if camera is not None and (camera not in ("galaxy", "vcamera") or mode not in ("intrinsics", "marker", "pivot", "imu")):
@@ -153,6 +195,10 @@ class Studio:
                 entry = "python.scripts.calibrate"
                 profile = PREVIEW_PROFILES["vcamera"] if mode == "intrinsics" else self.config.get(mode, PREVIEW_PROFILES[mode])
                 arguments = ["capture", "--config", preset or profile, *location]
+                if geometry:
+                    arguments.extend(("--tracking-geometry", geometry))
+                    if intrinsics:
+                        arguments.extend(("--tracking-intrinsics", intrinsics))
             elif mode == "vcamera":
                 entry = "python.scripts.calibrate"
                 arguments = ["inspect-vcamera", *location]
@@ -285,6 +331,9 @@ def main(argv=None):
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
     studio = Studio(args, json.loads(args.config.read_text(encoding="utf-8-sig")))
+    scope = (str(args.config.resolve()), args.ssh, str(args.ssh_config) if args.ssh else None)
+    scope_key = hashlib.sha256(json.dumps(scope).encode()).hexdigest()[:24]
+    recent = RecentPaths(PROJECT_ROOT / "configs" / "studio.local" / f"{scope_key}.json")
     page = Path(__file__).with_suffix(".html").read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
@@ -308,6 +357,7 @@ def main(argv=None):
             elif self.path == "/presets":
                 self.send(200, json.dumps({
                     "target": args.ssh or "本机", "presets": {**PREVIEW_PROFILES, **studio.config},
+                    "recent_paths": recent.read(),
                 }).encode(), "application/json")
             else:
                 self.send_error(404)
@@ -331,6 +381,14 @@ def main(argv=None):
                     }:
                         raise ValueError("任务参数无效")
                     studio.start(self.path.removeprefix("/start/"), **options)
+                elif self.path == "/recent-path":
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 8192:
+                        raise ValueError("请求长度无效")
+                    options = json.loads(self.rfile.read(size))
+                    if not isinstance(options, dict) or options.keys() != {"mode", "key", "value"}:
+                        raise ValueError("文件路径设置无效")
+                    recent.save(**options)
                 elif self.path == "/stop":
                     studio.stop()
                 elif self.path == "/switch":

@@ -27,6 +27,35 @@ def build_parser():
     return parser
 
 
+def rectangle_failure_details(report, options):
+    descriptions = {
+        'solver_converged': '求解器未收敛',
+        'validation_marker_coverage': '留出图未覆盖所有靶标码',
+        'positive_depth': '有角点处于相机后方',
+        'viewing_diversity': f'有靶标码的视角跨度小于 {options["min_view_angle_deg"]:g}°',
+        'dimension_bounds_inactive': '有靶标码的宽或高触及尺寸约束',
+    }
+    details = []
+    for check, observations, label, key in (
+        ('training_reprojection', 'training_observations', '训练码', 'max_observation_rmse_px'),
+        ('validation_reprojection', 'validation_observations', '留出码', 'max_validation_rmse_px'),
+        ('checkerboard_reprojection', 'checkerboard_observations', '棋盘格内点', 'max_observation_rmse_px'),
+    ):
+        if report['checks'][check]:
+            continue
+        records = report[observations]
+        worst = max(records, key=lambda observation: observation['rmse_px'])
+        limit = options[key]
+        count = sum(observation['rmse_px'] > limit for observation in records)
+        location = f'第 {worst["group"] + 1} 组 {Path(worst["image"]).name}'
+        if 'id' in worst:
+            location += f' ID {worst["id"]}'
+        details.append(f'{label} RMS 超限 {count}/{len(records)}，最大 {worst["rmse_px"]:.3f} px'
+                       f'（上限 {limit:g} px，{location}）')
+    details.extend(message for check, message in descriptions.items() if not report['checks'][check])
+    return '。'.join(details)
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -113,12 +142,18 @@ def main(argv=None):
         print(f'Reference ID: {reference}; {model} dimensions (mm): {sizes}', flush=True)
         print(f'Quality checks: {report["checks"]}', flush=True)
         if not report['passed']:
-            print('Calibration checks failed; quality report saved. No geometry YAML written.', file=sys.stderr)
+            if board:
+                details = rectangle_failure_details(report, config['calibration'])
+                print(f'Error: 几何标定质量检查未通过。{details}。详见 marker_calibration_quality.json。',
+                      file=sys.stderr, flush=True)
+            else:
+                print('Calibration checks failed; quality report saved. No geometry YAML written.', file=sys.stderr)
             return 1
         destination = output / config['output']['filename']
         save_geometry(destination, geometry, lengths, reference, config,
                       optimization_method=method,
-                      reference_marker_length_fixed=model == 'square')
+                      reference_marker_length_fixed=model == 'square',
+                      dimensions=report.get('marker_dimensions_mm'))
         print(f'Saved geometry: {destination}', flush=True)
         return 0
     except (ValueError, KeyError, TypeError, OSError, RuntimeError, ImportError, cv2.error) as error:

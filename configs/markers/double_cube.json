@@ -29,10 +29,13 @@
   },
   "calibration": {
     "min_views": 15,
+    "min_group_views": 10,
+    "min_groups": 5,
     "min_marker_views": 5,
     "min_pair_views": 3,
     "validation_stride": 5,
     "max_pnp_rmse_px": 3.0,
+    "max_board_pnp_rmse_px": 2.0,
     "vote_translation_ratio": 0.5,
     "vote_rotation_deg": 25.0,
     "loss_scale_px": 1.0,
