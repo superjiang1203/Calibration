@@ -1,0 +1,67 @@
+{
+  "schema_version": 2,
+  "mode": "marker_geometry",
+  "sensor_config": "../cameras/galaxy.json",
+  "camera_parameters": "../../output/20261110_113226_969929/sensor_galaxy_gray_intrinsics.yml",
+  "marker": {
+    "dictionary": "DICT_4X4_100",
+    "expected_count": 9,
+    "ids": [
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39
+    ],
+    "reference_marker_id": 39,
+    "reference_marker_length_mm": null,
+    "length_source": "checkerboard_35_mm",
+    "geometry_model": "rectangle",
+    "checkerboard": {
+      "pattern_cols": 11,
+      "pattern_rows": 8,
+      "square_size_mm": 35.0
+    }
+  },
+  "calibration": {
+    "min_views": 15,
+    "min_group_views": 10,
+    "min_groups": 5,
+    "min_marker_views": 5,
+    "min_pair_views": 3,
+    "validation_stride": 5,
+    "max_pnp_rmse_px": 3.0,
+    "max_board_pnp_rmse_px": 2.0,
+    "vote_translation_ratio": 0.5,
+    "vote_rotation_deg": 25.0,
+    "loss_scale_px": 1.0,
+    "max_observation_rmse_px": 2.0,
+    "max_validation_rmse_px": 3.0,
+    "max_outlier_fraction": 0.2,
+    "min_length_ratio": 0.7,
+    "max_length_ratio": 1.3,
+    "min_view_angle_deg": 10.0,
+    "max_nfev": 500
+  },
+  "output": {
+    "filename": "double_cube_31_39_geometry.yaml",
+    "instrument": {
+      "id": "calibrated-double-cube-31-39",
+      "display_name": "?????? ID 31?39",
+      "enabled": true,
+      "sort_order": 100,
+      "model": "marked_object",
+      "marker_dictionary": "DICT_4X4_100",
+      "kind": "navigation_stick"
+    },
+    "tip_offset": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  }
+}
