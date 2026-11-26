@@ -865,7 +865,7 @@ def main():
     )
     parser.add_argument(
         "--config",
-        default=str(PROJECT_ROOT / "configs/markers/double_cube.json"),
+        default=str(PROJECT_ROOT / "configs/markers/double_cube_81_90.json"),
     )
     add_target_arguments(parser, PROJECT_ROOT)
     args = parser.parse_args()

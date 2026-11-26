@@ -1,6 +1,6 @@
 {
   "mode": "marker_pivot",
-  "capture_config": "double_cube.json",
+  "capture_config": "double_cube_81_90.json",
   "geometry": "../../output/20261118_marker_C_planar_geometry/double_cube_geometry.yaml",
   "intrinsics": "../../output/20261118_marker_C_planar_geometry/camera_intrinsics.yml",
   "max_validation_rms_mm": 0.5

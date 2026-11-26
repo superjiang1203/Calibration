@@ -15,7 +15,7 @@ from ..session_storage import write_image, write_json
 from ..sensor_intrinsics.detection import prepare_gray8
 from ..workflow.config import PROJECT_ROOT, validate_sensor_profile
 
-DEFAULT_CONFIG = PROJECT_ROOT / 'configs' / 'markers' / 'double_cube.json'
+DEFAULT_CONFIG = PROJECT_ROOT / 'configs' / 'markers' / 'double_cube_81_90.json'
 DEFAULT_OPTIONS = {
     'min_views': 15, 'min_group_views': 10, 'min_groups': 5, 'min_marker_views': 5, 'min_pair_views': 3,
     'validation_stride': 5, 'max_pnp_rmse_px': 3.0, 'max_board_pnp_rmse_px': 2.0,

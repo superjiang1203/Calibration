@@ -51,7 +51,7 @@
     "filename": "double_cube_31_39_geometry.yaml",
     "instrument": {
       "id": "calibrated-double-cube-31-39",
-      "display_name": "?????? ID 31?39",
+      "display_name": "双立方体靶标 ID 31–39",
       "enabled": true,
       "sort_order": 100,
       "model": "marked_object",

@@ -5,8 +5,9 @@
   "camera_parameters": "../../output/20261110_113226_969929/sensor_galaxy_gray_intrinsics.yml",
   "marker": {
     "dictionary": "DICT_4X4_100",
-    "expected_count": 9,
+    "expected_count": 10,
     "ids": [
+      81,
       82,
       83,
       84,
