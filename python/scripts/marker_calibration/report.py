@@ -150,13 +150,13 @@ def build(root):
 <table><tr><th>移除组</th><th>该组验证角点 RMS px</th><th>几何角点变化 RMS mm</th><th>最大变化 mm</th></tr>{fold_rows}</table>
 <h2>边长与坐标系</h2><p>长度单位为 mm；全部九个码边长自由估计。原点是 ID84 中心，解码后 +X 向右、+Y 向上、+Z 为码面外法向。四角按 OpenCV 解码顺序：左上、右上、右下、左下。</p>
 <table><tr><th>ID</th><th>边长 mm</th><th>有效验证角点 RMS px</th><th>P95 px</th><th>验证张数</th></tr>{edge_rows}</table>
-<h2>与工程输出保持一致</h2><p>最终文件直接调用工程 <code>marker_calibration/marker_io.py::save_geometry()</code>，使用原 <code>double_cube_81_90.json</code> 的 instrument 与 tip_offset 配置。文件名、字段集合、schema_version、ID 整数键和行内三元坐标格式保持一致。</p>
+<h2>与工程输出保持一致</h2><p>最终文件直接调用工程 <code>marker_calibration/marker_io.py::save_geometry()</code>，使用原 <code>double_cube_82_90.json</code> 的 instrument 与 tip_offset 配置。文件名、字段集合、schema_version、ID 整数键和行内三元坐标格式保持一致。</p>
 <pre>marker_positions:\n  84:\n  - [-L84/2, L84/2, 0.0]\n  - [ L84/2, L84/2, 0.0]\n  - [ L84/2,-L84/2, 0.0]\n  - [-L84/2,-L84/2, 0.0]\nreference_marker_id: 84\nscale_source: checkerboard_35_mm\nreference_marker_length_fixed: false\ntip_offset_source: configured_not_calibrated</pre>
 <p>方法和尺度的字段值如实记录此次棋盘标定；参考码长度不固定。<code>tip_offset: [0.0, 0.0, 0.0]</code> 是工程配置值，此次未估计器械尖端。</p>
 <h2>数值门禁</h2><p>采用工程配置的训练观测 2 px、验证观测 3 px、每码最少 5 张训练图、最少 15 张训练图和至少 10° 观察方向跨度，并额外检查七轮分组验证。</p><table><tr><th>检查</th><th>状态</th></tr>{gate_rows}</table>
 <h2>投影叠加</h2>{gallery}
 <h2>复现文件</h2><p><code>detections.json</code> 保留图像观测与筛选理由；<code>marker_all_candidate_observations.json</code> 保留筛选前误差；<code>marker_group_validation.json</code> 保留七轮详细结果。<code>source_manifest.json</code> 记录原始图像 SHA-256。</p>
-<pre>python -m python.scripts.marker_calibration.checkerboard_geometry fit --source inputs/camera_source --output .\npython -m python.scripts.marker_calibration.checkerboard_geometry groups --output .\npython -m python.scripts.marker_calibration.checkerboard_geometry export --output . --config configs/markers/double_cube_81_90.json</pre>
+<pre>python -m python.scripts.marker_calibration.checkerboard_geometry fit --source inputs/camera_source --output .\npython -m python.scripts.marker_calibration.checkerboard_geometry groups --output .\npython -m python.scripts.marker_calibration.checkerboard_geometry export --output . --config configs/markers/double_cube_82_90.json</pre>
 <p class="muted">正式几何以 double_cube_geometry.yaml 中的全精度浮点数为准。</p></main></html>'''
     (root / "marker_calibration_report.html").write_text(page, encoding="utf-8")
     (root / "README.md").write_text(

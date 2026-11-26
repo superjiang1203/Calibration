@@ -94,14 +94,17 @@ def capture_poses(paths, geometry, camera, detector, threshold):
     return accepted, rejected
 
 
-def run_configured(command, config_path, session=None, *, camera_vendor=None, camera_intrinsics=None):
+def run_configured(command, config_path, session=None, *, geometry=None, camera_vendor=None, camera_intrinsics=None):
     from ..session_storage import timestamp_directory
     from ..workflow.config import PROJECT_ROOT
     from .marker_session import capture_session
     from .marker_io import load_config, select_capture_camera
 
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
-    geometry = (config_path.parent / config["geometry"]).resolve()
+    if geometry is None:
+        if not config.get("geometry"):
+            raise ValueError("Specify the calibrated marker geometry YAML with --pivot-geometry.")
+        geometry = (config_path.parent / config["geometry"]).resolve()
     if not geometry.is_file():
         raise ValueError(f"Marker geometry is missing: {geometry}")
     if command in ("run", "capture"):

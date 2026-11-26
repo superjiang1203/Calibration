@@ -134,6 +134,7 @@ def run_workflow(args, root, *, marker=False):
         ("--calibration-dir", getattr(args, "calibration_dir", None)),
         ("--camera-intrinsics", getattr(args, "camera_intrinsics", None)),
         ("--tracking-geometry", getattr(args, "tracking_geometry", None)),
+        ("--pivot-geometry", getattr(args, "pivot_geometry", None)),
         ("--tracking-intrinsics", getattr(args, "tracking_intrinsics", None)),
     ):
         if value is not None:

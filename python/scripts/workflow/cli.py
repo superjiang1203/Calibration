@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera", choices=("galaxy", "vcamera"), help="Marker 或竖轴采集使用的相机")
     parser.add_argument("--camera-intrinsics", type=Path, help="所选相机的内参 YAML")
     parser.add_argument("--tracking-geometry", type=Path)
+    parser.add_argument("--pivot-geometry", type=Path)
     parser.add_argument("--tracking-intrinsics", type=Path)
     add_target_arguments(parser, PROJECT_ROOT)
     return parser
@@ -107,6 +108,8 @@ def main(argv=None) -> int:
         if not isinstance(configured, dict):
             raise ValueError("Workflow configuration must be a JSON object")
         configured_mode = configured.get("mode")
+        if args.pivot_geometry and configured_mode != "marker_pivot":
+            raise ValueError("--pivot-geometry requires a marker_pivot configuration.")
         if (args.tracking_geometry or args.tracking_intrinsics) and (
             args.command != "capture" or configured.get("sensor_type") not in ("galaxy", "vcamera")
             or not args.tracking_geometry
@@ -121,6 +124,7 @@ def main(argv=None) -> int:
             return run_configured(
                 args.command, session_path(args.config),
                 session_path(args.session) if args.session is not None else None,
+                geometry=session_path(args.pivot_geometry) if args.pivot_geometry else None,
                 camera_vendor=args.camera, camera_intrinsics=args.camera_intrinsics,
             )
         if configured_mode == "marker_geometry":

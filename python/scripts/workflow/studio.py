@@ -168,8 +168,11 @@ class Studio:
             if bool(calibration_dir) != (command == "verify"):
                 raise ValueError("复核需要指定标定结果目录")
             tracking = mode in PREVIEW_PROFILES and command == "capture"
-            if (mode != "imu" and not tracking and (geometry or intrinsics)) or (mode == "imu" and preset):
+            if ((mode not in ("imu", "pivot") and not tracking and (geometry or intrinsics))
+                    or (mode == "imu" and preset) or (mode == "pivot" and intrinsics)):
                 raise ValueError("参数与当前模式不匹配")
+            if mode == "pivot" and not geometry:
+                raise ValueError("请选择已经标定好的 Marker 几何 YAML。")
             if tracking and (bool(intrinsics) != (bool(geometry) and mode == "galaxy")):
                 raise ValueError("Galaxy 追踪需要几何 YAML 和内参 YAML。RGB 预览自动读取 SDK 内参。")
             if bool(frame) != (mode == "vcamera" and command == "frame"):
@@ -247,6 +250,8 @@ class Studio:
                     arguments.extend(("--session", session.strip()))
                 if calibration_dir:
                     arguments.extend(("--calibration-dir", calibration_dir))
+                if mode == "pivot":
+                    arguments.extend(("--pivot-geometry", geometry.strip()))
                 if capture_override:
                     arguments.extend(("--camera", camera))
                     if camera_intrinsics:

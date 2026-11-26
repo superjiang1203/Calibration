@@ -122,8 +122,9 @@ const modes = {
     },
     pivot: {
         help: '保持工具球尖位置固定，从不同方向倾斜并滚转工具，采集后自动求解。',
-        fields: ['camera', 'preset', 'session'], actions: [
-            ['run', '采集并求解'], ['capture', '只采集原图'], ['calibrate', '求解已有会话', 'session']
+        fields: ['camera', 'preset', 'geometry', 'session'], actions: [
+            ['run', '采集并求解', 'geometry'], ['capture', '只采集原图', 'geometry'],
+            ['calibrate', '求解已有会话', 'geometry', 'session']
         ]
     },
     imu: {
@@ -175,7 +176,9 @@ function renderPanel() {
         const previewTracking = ['galaxy', 'vcamera'].includes(selected);
         const trackingTitle = key === 'geometry' ? 'Marker 几何或末端 YAML（执行主机，可选）'
             : key === 'intrinsics' ? '追踪用相机内参 YAML（执行主机）' : title;
-        label.append(previewTracking ? trackingTitle : title, field);
+        const fieldTitle = selected === 'pivot' && key === 'geometry'
+            ? '已标定的 Marker 几何 YAML（执行主机）' : previewTracking ? trackingTitle : title;
+        label.append(fieldTitle, field);
         if (key === 'camera') {
             const defaultName = ['marker', 'pivot'].includes(selected) ? '使用任务配置' : 'Galaxy 灰度';
             field.add(new Option(defaultName, ''));
