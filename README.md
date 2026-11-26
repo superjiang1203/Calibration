@@ -42,7 +42,7 @@ Marker 页默认使用 [double_cube_81_90.json](configs/markers/double_cube_81_9
 
 离线标定会先用同一规则重检原图，棋盘 PnP 筛选结果保存在 `checkerboard_observations.json`。首次 BA 收敛后，按「图片 + ID」剔除训练帧中重投影 RMS 超过 **2 px**（`calibration.max_observation_rmse_px`）或角点深度无效的码。剩余至少 **2 个靶标码**的帧继续使用，少于 2 个则整帧移出训练。系统检查组数、有效帧数和码覆盖，再用余下的数据拟合。`marker_filter.json` 记录剔除的码、帧和重投影误差。留出帧保留独立验证。
 
-BA 用棋盘 RANSAC 内点定毫米尺度，ID 90 定义参考坐标系，各码宽高独立拟合。`marker_calibration_quality.json` 记录宽高、各帧重投影误差和质量检查结果。质量检查通过后，几何 YAML 的 `marker_positions` 保存四角。新会话使用配置指定的 Galaxy 内参，续采和重新标定读取会话内的副本。
+BA 用棋盘 RANSAC 内点定毫米尺度，配置指定的参考码定义靶标坐标系，各码宽高独立拟合。求解得到几何后，每个 ID 至少有 **5 张有效训练图**即可导出 YAML。若原训练图覆盖不足，会保留首轮独立留出报告 `marker_holdout_quality.json`，再纳入原留出图重新筛选和拟合。留出误差及其他质量指标作为诊断记录。最终报告是 `marker_calibration_quality.json`，几何 YAML 的 `marker_positions` 保存四角。新会话使用配置指定的 Galaxy 内参，续采和重新标定读取会话内的副本。
 
 Galaxy 灰度和 Vcamera RGB 预览支持加载 Marker 几何 YAML。填写执行主机上的路径再打开预览，画面会叠加定位到的码框和 ID。Galaxy 需填写对应分辨率的内参 YAML，Vcamera RGB 从 SDK 读取内参。加载末端标定生成的几何 YAML 后，画面还会显示尖端十字和相机坐标系下的 XYZ（mm）。
 

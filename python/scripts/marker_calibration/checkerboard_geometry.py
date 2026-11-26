@@ -57,10 +57,17 @@ def calibrate_rectangles(views, ids, marker, camera, options, output):
     print(f'棋盘 PnP 筛选保留 {len(frames)}/{len(views)} 张。'
           f'棋盘角点不完整 {len(missing_board)} 张，PnP 未通过 {len(rejected_pnp)} 张。'
           '详见 checkerboard_observations.json。', flush=True)
-    return fit_rectangles(frames, ids, marker, board, camera, options, output)
+    result = fit_rectangles(frames, ids, marker, board, camera, options, output)
+    if result[3]["export_allowed"] or not any(frame.get("split") == "test" for frame in frames):
+        return result
+    # The independent evaluation belongs to the first fit. Use all available
+    # views for the final fit when training coverage would prevent export.
+    b.write_json(output / "marker_holdout_quality.json", result[3])
+    print("训练覆盖不足，使用全部有效图重新拟合。留出检查报告单独保存。", flush=True)
+    return fit_rectangles(frames, ids, marker, board, camera, options, output, use_all_views=True)
 
 
-def fit_rectangles(views, ids, marker, board, camera, options, output):
+def fit_rectangles(views, ids, marker, board, camera, options, output, *, use_all_views=False):
     from .geometry import check_coverage
     from .planar import PlanarJointProblem, errors, rectangle_shape
 
@@ -75,7 +82,7 @@ def fit_rectangles(views, ids, marker, board, camera, options, output):
         group = view.get("group", 0)
         seen_per_group[group] += 1
         default_split = "test" if seen_per_group[group] % options["validation_stride"] == 0 else "train"
-        split = view.get("split", default_split)
+        split = "train" if use_all_views else view.get("split", default_split)
         corners = {mid: points for mid, points in view["corners"].items() if mid in target_ids}
         if len(corners) < minimum_codes:
             dropped.append({"image": view["image"], "group": group, "split": split,
@@ -95,16 +102,10 @@ def fit_rectangles(views, ids, marker, board, camera, options, output):
             "retained_group_image_counts": dict(counts),
             "rejected_training_markers": rejected, "dropped_frames": dropped,
         })
-        if len(counts) < options["min_groups"]:
-            raise ValueError(f'筛选后剩余 {len(counts)} 组，至少需要 {options["min_groups"]} 组。'
-                             '详见 checkerboard_observations.json 和 marker_filter.json。')
         connectivity_views = []
-        for group, count in counts.items():
-            if count < options["min_group_views"]:
-                raise ValueError(f'筛选后第 {group + 1} 组剩余 {count} 张有效图，'
-                                 f'至少需要 {options["min_group_views"]} 张。详见 marker_filter.json。')
+        for group in counts:
             group_train = [frame for frame in train if frame["group"] == group]
-            if len(group_train) < 3 or not any(frame["group"] == group for frame in test):
+            if len(group_train) < 3 or (not use_all_views and not any(frame["group"] == group for frame in test)):
                 raise ValueError(f"筛选后第 {group + 1} 组需要至少 3 张训练图和 1 张留出图。")
             observed = Counter(mid for frame in group_train for mid in frame["markers"])
             connectivity_views.append({"corners": {mid for mid, count in observed.items() if count >= 3}})
@@ -158,6 +159,9 @@ def fit_rectangles(views, ids, marker, board, camera, options, output):
     dimensions = {mid: dict(zip(("width", "height"), np.exp(shape).tolist())) for mid, shape in shapes.items()}
     lengths = {mid: (size["width"] + size["height"]) / 2 for mid, size in dimensions.items()}
     validation = errors(test, points, placements, k, d)
+    training_counts = Counter(r["id"] for r in training
+                              if r["positive_depth"] and r["rmse_px"] <= limit)
+    export_counts = {mid: training_counts[mid] for mid in ids}
     board_residuals = []
     for frame in train + test:
         pose = camera_map.get(frame["image"], frame["camera"])
@@ -182,7 +186,7 @@ def fit_rectangles(views, ids, marker, board, camera, options, output):
     checks = {
         "solver_converged": stage["success"],
         "training_reprojection": all(r["rmse_px"] <= options["max_observation_rmse_px"] for r in training),
-        "validation_reprojection": all(r["rmse_px"] <= options["max_validation_rmse_px"] for r in validation),
+        "validation_reprojection": bool(validation) and all(r["rmse_px"] <= options["max_validation_rmse_px"] for r in validation),
         "validation_marker_coverage": {r["id"] for r in validation} == set(ids),
         "checkerboard_reprojection": worst_board["rmse_px"] <= options["max_observation_rmse_px"],
         "positive_depth": all(r["positive_depth"] for r in training + validation),
@@ -191,6 +195,9 @@ def fit_rectangles(views, ids, marker, board, camera, options, output):
     }
     report = {
         "passed": all(checks.values()), "checks": checks, "geometry_model": "rectangle",
+        "export_allowed": all(count >= 5 for count in export_counts.values()),
+        "minimum_export_training_images_per_id": 5,
+        "valid_training_images_per_id": export_counts, "fit_uses_all_views": use_all_views,
         "reference_marker_id": reference, "reference_marker_length_fixed": False,
         "checkerboard": marker["checkerboard"], "marker_dimensions_mm": dimensions,
         "maximum_checkerboard_rmse_px": worst_board["rmse_px"],

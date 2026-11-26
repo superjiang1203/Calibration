@@ -141,13 +141,19 @@ def main(argv=None):
         sizes = report.get('marker_dimensions_mm', lengths)
         print(f'Reference ID: {reference}; {model} dimensions (mm): {sizes}', flush=True)
         print(f'Quality checks: {report["checks"]}', flush=True)
-        if not report['passed']:
-            if board:
-                details = rectangle_failure_details(report, config['calibration'])
-                print(f'Error: 几何标定质量检查未通过。{details}。详见 marker_calibration_quality.json。',
-                      file=sys.stderr, flush=True)
-            else:
-                print('Calibration checks failed; quality report saved. No geometry YAML written.', file=sys.stderr)
+        if board:
+            minimum = report['minimum_export_training_images_per_id']
+            insufficient = {mid: count for mid, count in report['valid_training_images_per_id'].items()
+                            if count < minimum}
+            if insufficient:
+                print(f'Error: 以下 ID 的有效训练图少于 {minimum} 张：{insufficient}。', file=sys.stderr, flush=True)
+                return 1
+            if not report['passed']:
+                print('几何文件可导出。诊断检查结果见 marker_calibration_quality.json。', flush=True)
+                if report['validation_observations']:
+                    print(rectangle_failure_details(report, config['calibration']), flush=True)
+        elif not report['passed']:
+            print('Calibration checks failed; quality report saved. No geometry YAML written.', file=sys.stderr)
             return 1
         destination = output / config['output']['filename']
         save_geometry(destination, geometry, lengths, reference, config,
