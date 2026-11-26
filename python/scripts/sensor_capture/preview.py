@@ -375,6 +375,7 @@ class CaptureView:
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         frame = frame.copy(order="C")
         if self.video_writer is None:
+            self.video_directory.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             filename = f"preview_{stamp}_{uuid4().hex[:8]}"
             self.video_path = self.video_directory / f"{filename}.mp4"
@@ -388,6 +389,7 @@ class CaptureView:
             self.video_frames = 0
             self.video_previous = frame
             self.log("已开始录制相机预览。")
+            print(f"Capture session: {self.video_directory}", flush=True)
         if frame.shape != self.video_previous.shape:
             self.stop_video()
             self.log("画面分辨率变化，当前录像已结束。")

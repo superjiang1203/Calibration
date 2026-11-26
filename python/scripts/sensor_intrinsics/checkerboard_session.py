@@ -51,7 +51,8 @@ def _capture_session(config, session_path, view):
     tracking = config.get('live_tracking')
     tracking_error = None
     arrivals = deque()
-    if view.web and config['mode'] == 'camera_preview' and len(labels) == 1:
+    preview_only = config['mode'] == 'camera_preview'
+    if view.web and preview_only and len(labels) == 1:
         view.video_directory = session
 
     def on_read_error(adapter, group, error):
@@ -59,11 +60,12 @@ def _capture_session(config, session_path, view):
         view.log(f'{", ".join(sensor["label"] for sensor in group)} 取帧失败：{error}')
 
     try:
-        session.mkdir(parents=True, exist_ok=True)
-        for label, directory in image_directories.items():
-            (session / directory).mkdir(exist_ok=True)
-            print(f'{label}: original images -> {session / directory}')
-        print(f'Capture session: {session}')
+        if not preview_only:
+            session.mkdir(parents=True, exist_ok=True)
+            for label, directory in image_directories.items():
+                (session / directory).mkdir(exist_ok=True)
+                print(f'{label}: original images -> {session / directory}')
+            print(f'Capture session: {session}')
         print('Space: save original images, including any detection failures for review. Q/Esc: finish.')
         if pattern:
             print('Stop the board and sensors before saving. For separate devices, exposure synchronization is not guaranteed.')
@@ -187,6 +189,8 @@ def _capture_session(config, session_path, view):
                 if synchronized:
                     metadata.update(adapter.sdk_pair_metadata())
             write_json(session / 'capture_metadata.json', metadata)
+            if preview_only and not saved_batches:
+                print(f'Capture session: {session}', flush=True)
             saved_batches += 1
             last_saved = time.monotonic()
             missing = [label for label, found in detected.items() if not found]
@@ -195,7 +199,7 @@ def _capture_session(config, session_path, view):
             count = settings.get('target_count', 40)
             if count and saved_batches >= count:
                 break
-        if not (session / 'capture_metadata.json').exists():
+        if not preview_only and not (session / 'capture_metadata.json').exists():
             write_json(session / 'capture_metadata.json', metadata)
     finally:
         view.stop_video()

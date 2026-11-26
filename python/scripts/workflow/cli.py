@@ -158,8 +158,10 @@ def main(argv=None) -> int:
         else:
             from ..sensor_intrinsics.checkerboard_session import capture_session
 
-            session = timestamp_directory(PROJECT_ROOT / "data")
-            print(f"Capture session: {session}")
+            preview_only = config["mode"] == "camera_preview"
+            session = timestamp_directory(PROJECT_ROOT / "data", create=not preview_only)
+            if not preview_only:
+                print(f"Capture session: {session}")
             captured = capture_session(config, session)
             if isinstance(captured, int) and captured != 0:
                 return captured

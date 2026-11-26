@@ -62,10 +62,15 @@ def write_image(path, image):
         temporary.unlink(missing_ok=True)
 
 
-def timestamp_directory(parent: Path) -> Path:
-    parent.mkdir(parents=True, exist_ok=True)
+def timestamp_directory(parent: Path, *, create=True) -> Path:
+    if create:
+        parent.mkdir(parents=True, exist_ok=True)
     for _ in range(10):
         destination = parent / datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S_%f")
+        if not create:
+            if not destination.exists():
+                return destination
+            continue
         try:
             destination.mkdir()
             return destination

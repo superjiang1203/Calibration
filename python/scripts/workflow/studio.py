@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
+from tempfile import mkdtemp
 from urllib.request import ProxyHandler, build_opener
 from uuid import uuid4
 
@@ -33,6 +35,31 @@ PREVIEW_PROFILES = {"galaxy": "configs/cameras/galaxy.json",
                     "vcamera": "configs/cameras/vcamera_color.json"}
 PATH_FIELDS = {"preset", "session", "calibration_dir", "geometry", "intrinsics",
                "frame", "camera_intrinsics", "factory_output"}
+
+
+def launch_studio_browser(url, profile):
+    # A private Chromium profile gives Studio an owned process, including on
+    # browsers that refuse window.close() for tabs opened by the OS.
+    candidates = [shutil.which(name) for name in
+                  ("msedge", "chrome", "google-chrome", "chromium", "chromium-browser")]
+    if os.name == "nt":
+        for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            root = os.environ.get(key)
+            if root:
+                candidates.extend(str(Path(root) / name) for name in
+                                  ("Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe"))
+    for candidate in dict.fromkeys(candidates):
+        if candidate and Path(candidate).is_file():
+            try:
+                return subprocess.Popen([
+                    candidate, f"--user-data-dir={profile}", "--no-first-run",
+                    "--no-default-browser-check", f"--app={url}",
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                continue
+    webbrowser.open(url)
+    print("使用默认浏览器打开 Studio。浏览器可能要求手动关闭页签。", flush=True)
+    return None
 
 
 class RecentPaths:
@@ -414,12 +441,26 @@ def main(argv=None):
     with ThreadingHTTPServer(("127.0.0.1", args.port), Handler) as server:
         url = f"http://127.0.0.1:{server.server_port}/"
         print(f"Calibration workspace: {url}", flush=True)
-        if not args.no_browser:
-            webbrowser.open(url)
+        profile = None
+        browser = None
         try:
+            if not args.no_browser:
+                profile = mkdtemp(prefix="calibration-studio-browser-")
+                browser = launch_studio_browser(url, profile)
             server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
-            studio.stop(shutdown=True)
+            try:
+                studio.stop(shutdown=True)
+            finally:
+                if browser is not None and browser.poll() is None:
+                    browser.terminate()
+                    try:
+                        browser.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        browser.kill()
+                        browser.wait()
+                if profile is not None:
+                    shutil.rmtree(profile, ignore_errors=True)
     return 0
