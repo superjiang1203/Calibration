@@ -25,10 +25,12 @@ input[type=number]{width:7em}
 <span id="settingStatus" role="status"></span></p>
 <small>输入数值后按 Enter 或移出输入框应用。</small>
 <pre id="cameraLog" tabindex="0" style="max-height:10rem;overflow:auto;background:#101923;padding:8px">等待连接相机…</pre></details></section>
-<details class="panel imu-options"><summary>IMU 姿态、坐标设置和调试状态</summary><canvas id="attitude" width="440" height="280"></canvas>
+<section class="panel"><h3>IMU 三维姿态</h3><canvas id="attitude" width="440" height="280"></canvas>
+<p id="imuText" role="status"></p></section>
+<details class="panel imu-options"><summary>IMU 坐标设置和调试状态</summary>
 <p><select id="source" onchange="command('/imu/reset',{source:this.value})"><option value="icm42670">ICM42670 EKF</option><option value="jy931">JY931</option><option value="rion_imu406" hidden disabled>瑞芬 IMU406</option></select>
 <button onclick="command('/imu/align')">将当前 IMU 姿态对齐视觉轴</button><button onclick="command('/imu/reset')">恢复原始姿态</button></p>
-<p id="rate">测量实际姿态更新频率…</p><p class="warn" id="mode">等待 IMU 数据</p><p id="imuText"></p>
+<p id="rate">测量实际姿态更新频率…</p><p class="warn" id="mode">等待 IMU 数据</p>
 <small>原始四元数按 WXYZ、主动旋转显示。欧拉角约定 R = Rz(yaw) Ry(pitch) Rx(roll)。单次对齐只让当前两套轴重合，假设安装轴一致；它不是安装外参标定，不能据此判断绝对姿态精度。相机和 IMU 未做硬件同步。IMU 数据超过 500 ms 会隐藏叠加轴。</small>
 <p>绿：检测角点；红：几何投影；黄：残差。至少三个码时轮流留出一个完整码验证。</p>
 <p id="message"></p><pre id="state">正在连接…</pre></details></main>
@@ -170,6 +172,21 @@ function widget(sample) {
         scale = 85;
     // Oblique projection only for inspecting the raw 3D orientation, not a camera projection.
     const project = v => [origin[0] + scale * (.85 * v[0] + .5 * v[1]), origin[1] + scale * (.3 * v[0] - .5 * v[1] - .85 * v[2])];
+    const vertices = Array.from({length: 8}, (_, index) => {
+        const point = [index & 1 ? .55 : -.55, index & 2 ? .38 : -.38, index & 4 ? .16 : -.16];
+        return project(r.map(row => row.reduce((sum, value, i) => sum + value * point[i], 0)));
+    });
+    g.beginPath();
+    g.strokeStyle = '#b5cbdd';
+    g.lineWidth = 2;
+    vertices.forEach((point, index) => {
+        for (const axis of [1, 2, 4]) {
+            if (index & axis) continue;
+            g.moveTo(...point);
+            g.lineTo(...vertices[index | axis]);
+        }
+    });
+    g.stroke();
     ['#ff655f', '#69ed8a', '#69a9ff'].forEach((color, i) => {
         let p = project([r[0][i], r[1][i], r[2][i]]);
         g.strokeStyle = color;

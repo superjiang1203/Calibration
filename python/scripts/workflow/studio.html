@@ -130,7 +130,7 @@ const modes = {
         ]
     },
     imu: {
-        help: '在工作台查看视觉与 IMU 姿态。SSH 模式使用这里指定的本机 YAML 文件。',
+        help: '在工作台查看视觉与 IMU 姿态。SSH 模式支持本机 YAML 路径和远端 Linux 绝对路径。',
         fields: ['camera', 'imu_source', 'geometry', 'intrinsics'], actions: [['preview', '打开 IMU 预览', 'geometry', 'intrinsics']]
     },
     vcamera: {
@@ -182,7 +182,9 @@ function renderPanel() {
         const trackingTitle = key === 'geometry' ? 'Marker 几何或末端 YAML（执行主机，可选）'
             : key === 'intrinsics' ? '追踪用相机内参 YAML（执行主机）' : title;
         const fieldTitle = selected === 'pivot' && key === 'geometry'
-            ? '已标定的 Marker 几何 YAML（执行主机）' : previewTracking ? trackingTitle : title;
+            ? '已标定的 Marker 几何 YAML（执行主机）'
+            : selected === 'imu' && ['geometry', 'intrinsics'].includes(key)
+                ? title.replace('本机', '') : previewTracking ? trackingTitle : title;
         label.append(fieldTitle, field);
         if (key === 'camera') {
             const defaultName = ['marker', 'pivot'].includes(selected) ? '使用任务配置' : 'Galaxy 灰度';

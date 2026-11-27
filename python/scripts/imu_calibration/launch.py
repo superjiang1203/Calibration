@@ -19,6 +19,12 @@ from .relay import forward
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def remote_yaml_path(value):
+    if isinstance(value, str) and value.startswith(("/", "\\")) and not value.startswith(("//", "\\\\")):
+        return value.replace("\\", "/")
+    return None
+
+
 def upload(ssh, directory, geometry, intrinsics, remote_python):
     files = {
         "geometry.yaml": geometry,
@@ -37,9 +43,17 @@ def upload(ssh, directory, geometry, intrinsics, remote_python):
         relative = f"python/scripts/imu_calibration/{name}"
         files[relative] = ROOT / relative
     archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+    with ssh.open_sftp() as sftp, zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
         for name, path in files.items():
-            bundle.write(path, name)
+            remote_path = remote_yaml_path(path)
+            if remote_path is None:
+                bundle.write(path, name)
+            else:
+                try:
+                    with sftp.open(remote_path, "rb") as source:
+                        bundle.writestr(name, source.read())
+                except OSError as error:
+                    raise ValueError(f"Cannot read YAML on SSH host: {remote_path}: {error}") from error
     archive.seek(0)
     with ssh.open_sftp() as sftp:
         sftp.putfo(archive, f"{directory}/preview.zip")
@@ -107,8 +121,8 @@ def launch_local(args, producer):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--geometry", type=Path, required=True)
-    parser.add_argument("--intrinsics", type=Path)
+    parser.add_argument("--geometry", required=True)
+    parser.add_argument("--intrinsics")
     parser.add_argument("--ssh", metavar="PROFILE")
     parser.add_argument("--local", action="store_true")
     parser.add_argument(
@@ -138,7 +152,16 @@ def main():
     if args.camera == "vcamera":
         args.intrinsics = None
     rion = args.imu_source == "rion_imu406"
-    for path in (args.geometry, args.intrinsics, None if rion else args.bridge):
+    for name in ("geometry", "intrinsics"):
+        value = getattr(args, name)
+        if value is not None and (not args.ssh or remote_yaml_path(value) is None):
+            setattr(args, name, Path(value).resolve())
+    if not rion and not args.bridge.is_file():
+        parser.error(f"ICM42670 / JY931 bridge not found: {args.bridge}. "
+                     "For RION IMU406, select RION IMU406 as the Studio IMU source.")
+    for path in (args.geometry, args.intrinsics):
+        if isinstance(path, str):
+            continue
         if path is not None and not path.is_file():
             parser.error(f"File not found: {path}")
     if rion:

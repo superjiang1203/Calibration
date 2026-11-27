@@ -38,7 +38,33 @@ def solve_pivot(rotations, translations, robust_mm):
     return fit.x[:3], fit.x[3:], singular
 
 
-def capture_poses(paths, geometry, camera, detector, threshold):
+def marker_holdout(ids, geometry, observed, k, d, threshold):
+    """Check one marker against a pose supported by other marker faces."""
+    for held in ids:
+        support = [mid for mid in ids if mid != held]
+        obj = np.concatenate([geometry[mid] for mid in support])
+        if np.linalg.svd(obj - obj.mean(axis=0), compute_uv=False)[-1] < 1:
+            continue
+        pix = np.concatenate([observed[mid] for mid in support]).astype(np.float64)
+        ok, rvec, tvec = cv2.solvePnP(obj, pix, k, d, flags=cv2.SOLVEPNP_SQPNP)
+        if not ok:
+            continue
+        rotation = cv2.Rodrigues(rvec)[0]
+        if np.any((np.vstack((obj, geometry[held])) @ rotation.T + tvec.ravel())[:, 2] <= 0):
+            continue
+        delta = cv2.projectPoints(obj, rvec, tvec, k, d)[0].reshape(-1, 2) - pix
+        support_rms = np.sqrt(np.mean(np.sum(delta.reshape(-1, 4, 2)**2, axis=2), axis=1))
+        if not np.all(support_rms <= threshold):
+            continue
+        predicted = cv2.projectPoints(geometry[held], rvec, tvec, k, d)[0].reshape(-1, 2)
+        error = predicted - observed[held]
+        rms = float(np.sqrt(np.mean(np.sum(error**2, axis=1))))
+        if np.isfinite(rms):
+            yield {"id": held, "support_ids": support, "support_marker_rms_px": support_rms.tolist(),
+                   "held_rms_px": rms, "corner_residuals_px": error.tolist()}
+
+
+def capture_poses(paths, geometry, camera, detector, threshold, diagnostics=None):
     accepted, rejected = [], []
     k, d = camera["matrix"], camera["distortion"]
     for path in paths:
@@ -61,6 +87,9 @@ def capture_poses(paths, geometry, camera, detector, threshold):
             )
         observed, _ = detect(image, detector)
         ids = sorted(geometry.keys() & observed.keys())
+        if diagnostics is not None and len(ids) >= 3:
+            diagnostics.extend(dict(record, image=path.name) for record in
+                               marker_holdout(ids, geometry, observed, k, d, threshold))
         if len(ids) < 2:
             rejected.append({"image": path.name, "reason": "fewer than two markers"})
             continue
@@ -199,12 +228,30 @@ def main(argv=None):
     }
     camera = load_camera(args.intrinsics)
     detector = create_detector(document["instrument"]["marker_dictionary"])
+    holdout = []
     train, train_rejected = capture_poses(
-        paths_train, geometry, camera, detector, args.max_reprojection_px
+        paths_train, geometry, camera, detector, args.max_reprojection_px, holdout
     )
     test, test_rejected = capture_poses(
-        paths_test, geometry, camera, detector, args.max_reprojection_px
+        paths_test, geometry, camera, detector, args.max_reprojection_px, holdout
     )
+    by_marker = {}
+    for mid in geometry:
+        values = [row["held_rms_px"] for row in holdout if row["id"] == mid]
+        by_marker[mid] = {
+            "tested_frames": len(values),
+            "over_limit_frames": sum(value > args.max_reprojection_px for value in values),
+            "median_rms_px": float(np.median(values)) if values else None,
+        }
+    args.output.mkdir(parents=True, exist_ok=False)
+    diagnostic_path = args.output / "pivot_geometry_diagnostics.json"
+    diagnostic_path.write_text(json.dumps({
+        "geometry": str(args.geometry), "session": str(args.session) if args.session else None,
+        "threshold_px": args.max_reprojection_px, "markers": by_marker, "observations": holdout,
+        "train_rejected": train_rejected, "validation_rejected": test_rejected,
+        "train_accepted": len(train), "validation_accepted": len(test),
+    }, indent=2), encoding="utf-8")
+    print(f"Geometry diagnostics: {diagnostic_path}", flush=True)
     if len(train) < 12 or len(test) < 6:
         parser.error(
             f"Need at least 12 training and 6 validation poses after filtering; got {len(train)} and {len(test)}"
@@ -242,7 +289,6 @@ def main(argv=None):
             ],
         }
     report["passed"] = report["validation"]["rms_mm"] <= args.max_validation_rms_mm
-    args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "pivot_calibration_quality.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"
     )

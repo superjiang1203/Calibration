@@ -30,7 +30,7 @@ python python/scripts/calibrate.py studio --ssh camera-lab
 | 竖轴定位 | 填写执行主机上已标定的 Marker 几何 YAML，可只采集、采集并求解，或用已有会话求解。 |
 | IMU 预览 | 填写本机几何 YAML，查看视觉和 IMU 姿态。用 Galaxy 时填写内参 YAML，用 Vcamera 时由 SDK 读取内参。完成后点「关闭 IMU 预览」。 |
 
-Marker、竖轴定位和 IMU 页可以选择 Galaxy 或 Vcamera。选 Vcamera 时，连接设备后由 SDK 读取当前采集模式的出厂内参，页面无需填写内参路径。Marker 和竖轴会将内参写入会话的 `camera_params.yml`，供续采或离线求解。选 Galaxy 时使用对应设备和分辨率的标定 YAML。SSH 模式下 Marker 和竖轴的 Galaxy 内参路径以远端工程为准，IMU 的 Galaxy 内参从本机读取。
+Marker、竖轴定位和 IMU 页可以选择 Galaxy 或 Vcamera。选 Vcamera 时，连接设备后由 SDK 读取当前采集模式的出厂内参，页面无需填写内参路径。Marker 和竖轴会将内参写入会话的 `camera_params.yml`，供续采或离线求解。选 Galaxy 时使用对应设备和分辨率的标定 YAML。SSH 模式下 Marker 和竖轴的 Galaxy 内参路径以远端工程为准。IMU 预览支持本机 YAML 路径，也支持以 `/data2/…` 开头的远端 Linux 绝对路径。
 
 使用瑞芬 IMU406 时，在 IMU 预览选择「瑞芬 IMU406」，填写 **运行 Studio 的主机**上的串口，例如 Windows 的 `COM5` 或 Linux 的 `/dev/ttyUSB0`。只有一个 USB 串口时可保留 `auto`。通过 SSH 使用远端相机时，IMU 仍接在启动 Studio 的主机上。串口默认使用 RION 68 协议、115200 波特、8N1、设备地址 0，可在 `configs/studio.json` 的 `imu.rion` 中调整。页面显示姿态、三轴加速度和三轴角速度。模块的 TTL 接口为 3.3 V，接电脑时使用配套 USB 转接器或兼容的 3.3 V USB–TTL 转接器。
 

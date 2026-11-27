@@ -5,9 +5,8 @@
   "camera_parameters": "../../output/20261110_113226_969929/sensor_galaxy_gray_intrinsics.yml",
   "marker": {
     "dictionary": "DICT_4X4_100",
-    "expected_count": 10,
+    "expected_count": 9,
     "ids": [
-      81,
       82,
       83,
       84,
@@ -52,7 +51,7 @@
     "filename": "double_cube_geometry.yaml",
     "instrument": {
       "id": "calibrated-double-cube",
-      "display_name": "双立方体靶标",
+      "display_name": "双立方体靶标 ID 81–90",
       "enabled": true,
       "sort_order": 100,
       "model": "marked_object",
