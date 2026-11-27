@@ -6,6 +6,7 @@ import json
 import shutil
 import time
 from collections import Counter
+from itertools import combinations
 
 import cv2
 import numpy as np
@@ -55,7 +56,9 @@ class CaptureGroups:
 
         self.ids = set(marker['ids'])
         self.reference = marker['reference_marker_id']
-        self.plan = metadata['marker'].get('capture_groups') if 'marker' in metadata else marker.get('capture_groups')
+        layout = metadata.get('marker', marker)
+        self.plan = layout.get('capture_groups')
+        self.layers = layout.get('capture_layers')
         self.options = options
         self.metadata = metadata
         if camera is not None:
@@ -95,6 +98,43 @@ class CaptureGroups:
                 if train >= self.options['min_marker_views'] and test
                 and angle >= self.options['min_view_angle_deg']}
 
+    def side_plan(self, handoff):
+        upper, lower = self.layers
+        sector = upper.index(handoff) if handoff in upper else lower.index(handoff)
+        route = [upper[index] for index in range(sector + 1)] if sector <= 2 else [upper[0], upper[3]]
+        transition = list(dict.fromkeys([handoff, *reversed(route)]))
+        if len(transition) == 1:
+            transition.append(lower[0])
+        side_groups = [[upper[index - 1], upper[index], lower[index]] for index in range(1, 4)]
+        if lower[0] not in transition:
+            side_groups[0].insert(1, lower[0])
+        return [[self.reference, handoff], transition, *side_groups]
+
+    def select_handoff(self):
+        upper, lower = self.layers
+        qualified = self.qualified(0)
+        if self.reference not in qualified:
+            return None
+        order = [mid for index in (0, 1, 3, 2) for mid in (upper[index], lower[index])]
+        records = self.records(0)
+        return next((mid for mid in order if mid in qualified and
+                     self.connected_in_group(records, [self.reference, mid])), None)
+
+    def connected_in_group(self, records, planned):
+        pairs = Counter(
+            (first, second)
+            for record in records if record['split'] == 'train'
+            for first, second in combinations(sorted(set(planned) & set(record['ids'])), 2)
+        )
+        connected = {planned[0]}
+        while True:
+            expanded = connected | {mid for pair, count in pairs.items()
+                                    if count >= self.options['min_pair_views'] and connected.intersection(pair)
+                                    for mid in pair}
+            if expanded == connected:
+                return connected == set(planned)
+            connected = expanded
+
     def status(self):
         qualified = self.qualified(self.index)
         previous = set().union(*(self.qualified(i) for i in range(self.index)))
@@ -106,11 +146,23 @@ class CaptureGroups:
         ready = len(records) >= minimum and len(qualified) >= 2 and (
             bool(bridge) if self.index else self.reference in qualified
         )
-        planned = self.plan[self.index] if self.plan and self.index < len(self.plan) else []
-        next_plan = self.plan[self.index + 1] if self.plan and self.index + 1 < len(self.plan) else []
+        plan = self.plan
+        handoff = self.metadata.get('capture_handoff_id')
+        if self.layers and self.index == 0:
+            handoff = self.select_handoff()
+        if self.layers and handoff is not None:
+            plan = self.side_plan(handoff)
+        planned = plan[self.index] if plan and self.index < len(plan) else []
+        next_plan = plan[self.index + 1] if plan and self.index + 1 < len(plan) else []
+        if self.layers and not planned and self.index == 0:
+            planned = [self.reference]
+        linked = True
         if planned:
-            bridge = set(planned).intersection(self.plan[self.index - 1]) if self.index else set()
+            bridge = set(planned).intersection(plan[self.index - 1]) if self.index else set()
             ready = len(records) >= minimum and set(planned) <= qualified
+            if self.layers:
+                linked = handoff is not None and self.connected_in_group(records, planned)
+                ready = ready and linked
         ready_groups = self.index + int(ready)
         return {
             'group': self.index + 1, 'images': len(records), 'minimum_images': minimum, 'ready': ready,
@@ -121,7 +173,9 @@ class CaptureGroups:
             'missing': missing, 'qualified': sorted(qualified), 'bridge': sorted(bridge),
             'previous': sorted(previous),
             'planned_ids': planned, 'pending_ids': [mid for mid in planned if mid not in qualified],
-            'next_ids': next_plan, 'can_advance': ready and (not self.plan or bool(next_plan)),
+            'next_ids': next_plan, 'can_advance': ready and (not (self.layers or self.plan) or bool(next_plan)),
+            'layered': bool(self.layers), 'handoff_id': handoff, 'co_visibility_ready': linked,
+            'aim_id': self.layers[0][self.index - 1] if self.layers and 0 < self.index <= 4 else None,
         }
 
     def board_pose(self, image, records):
@@ -148,7 +202,7 @@ class CaptureGroups:
         corners, _ = detect(image, detector)
         visible = {mid: corners[mid] for mid in sorted(self.ids & corners.keys())}
         status = self.status()
-        if status['planned_ids']:
+        if status['planned_ids'] and not (self.layers and self.index == 0):
             visible = {mid: points for mid, points in visible.items() if mid in status['planned_ids']}
         if len(visible) < 2:
             raise ValueError(f'Show at least two target markers from {status["planned_ids"] or sorted(self.ids)}')
@@ -297,7 +351,9 @@ def _capture_session(config, session, camera, resume, view):
                 'sensors': [dict(sensor_record, image_directory=directory)],
                 'images': {'marker_camera': paths}, 'marker': config['marker'],
                 'camera_parameters_source': 'Vcamera SDK' if use_factory else str(config['camera_parameters']),
-                'camera_parameters': 'camera_params.yml', 'saved_views': []}
+                'camera_parameters': 'camera_params.yml', 'saved_views': [], 'calibration_complete': False}
+    if config.get('_config_path'):
+        metadata['capture_config'] = str(config['_config_path'])
     session.mkdir(parents=True, exist_ok=True)
     if resume:
         metadata = json.loads((session / 'capture_metadata.json').read_text(encoding='utf-8-sig'))
@@ -318,12 +374,25 @@ def _capture_session(config, session, camera, resume, view):
     if config['marker'].get('checkerboard'):
         saved_marker = metadata['marker']
         current_marker = config['marker']
-        if 'capture_groups' not in saved_marker:
-            current_marker = {key: value for key, value in current_marker.items() if key != 'capture_groups'}
-        if resume and ('capture_group' not in metadata or saved_marker != current_marker):
+        plan_keys = {'capture_groups', 'capture_layers'}
+        if resume and ({key: value for key, value in saved_marker.items() if key not in plan_keys} !=
+                       {key: value for key, value in current_marker.items() if key not in plan_keys}):
+            raise ValueError('Resume requires the same marker and checkerboard settings')
+        if resume and 'capture_group' not in metadata:
             raise ValueError('Resume requires an existing grouped capture with the same marker and checkerboard settings')
         metadata.setdefault('capture_group', 0)
         groups = CaptureGroups(config['marker'], config['calibration'], metadata, camera)
+        if resume and 'capture_layers' in current_marker and not groups.layers and groups.index <= 1:
+            groups.layers = current_marker['capture_layers']
+            handoff = groups.select_handoff() if groups.index else None
+            if not groups.index or handoff is not None:
+                saved_marker.pop('capture_groups', None)
+                saved_marker['capture_layers'] = groups.layers
+                groups.plan = None
+                if handoff is not None:
+                    metadata['capture_handoff_id'] = handoff
+            else:
+                groups.layers = None
         if resume:
             short = [i + 1 for i in range(groups.index)
                      if len(groups.records(i)) < groups.options['min_group_views']]
@@ -339,6 +408,7 @@ def _capture_session(config, session, camera, resume, view):
         if resume:
             view.log('Resume the same physical placement in the current group. Use Next group before moving the target.')
     write_json(session / 'capture_metadata.json', metadata)
+    frame_number = len(paths)
     title = 'Instrument calibration | SPACE save | Q / ESC finish'
     def open_camera():
         nonlocal camera
@@ -451,6 +521,8 @@ def _capture_session(config, session, camera, resume, view):
                     else:
                         view.log('Current group is incomplete. Continue moving the camera and check the ready IDs.')
                     continue
+                if groups.layers and not groups.index:
+                    metadata['capture_handoff_id'] = view.group_status['handoff_id']
                 metadata['capture_group'] += 1
                 view.group_status = groups.status()
                 metadata['capture_complete'] = view.group_status['complete']
@@ -478,15 +550,19 @@ def _capture_session(config, session, camera, resume, view):
                     record = {'ids': sorted(visible), 'ids_source': 'preview'}
                 if not groups and len(visible) < 2:
                     print('Warning: fewer than two target IDs; saving raw image for offline detection. Show multiple faces for co-visibility.', flush=True)
-                relative = f'{directory}/{len(paths):04d}.png'
-                if (session / relative).exists():
-                    raise ValueError(f'Refusing to overwrite original capture: {relative}')
+                relative = f'{directory}/{frame_number:04d}.png'
+                while (session / relative).exists():
+                    frame_number += 1
+                    relative = f'{directory}/{frame_number:04d}.png'
                 write_image(session / relative, image)
+                frame_number += 1
                 paths.append(relative)
                 seen.update(record['ids'])
                 current = adapters[0][0].metadata()
                 metadata['sensors'][0]['capture_metadata'] = current
                 metadata['saved_views'].append(dict(record, image=relative, elapsed_s=time.monotonic() - started))
+                metadata['calibration_complete'] = False
+                metadata.pop('geometry_result', None)
                 if groups:
                     view.group_status = groups.status()
                     metadata['capture_complete'] = view.group_status['complete']

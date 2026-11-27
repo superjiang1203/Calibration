@@ -12,13 +12,13 @@ import sys
 import webbrowser
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock, Thread
 from tempfile import mkdtemp
 from urllib.request import ProxyHandler, build_opener
 from uuid import uuid4
 
-from ..remote import add_target_arguments
+from ..remote import add_target_arguments, connect, load_profile
 from .config import PROJECT_ROOT
 
 
@@ -67,16 +67,28 @@ class RecentPaths:
         self.path = path
         self.lock = Lock()
 
-    def read(self):
+    def _read(self):
         try:
             saved = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
+        return saved if isinstance(saved, dict) else {}
+
+    def read(self):
         return {
             mode: {key: value for key, value in fields.items()
                    if key in PATH_FIELDS and isinstance(value, str)}
-            for mode, fields in saved.items() if mode in COMMANDS and isinstance(fields, dict)
-        } if isinstance(saved, dict) else {}
+            for mode, fields in self._read().items() if mode in COMMANDS and isinstance(fields, dict)
+        }
+
+    def _write(self, saved):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(f".{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def save(self, mode, key, value):
         if (not isinstance(mode, str) or mode not in COMMANDS
@@ -84,19 +96,64 @@ class RecentPaths:
                 or len(value) > 4096 or any(c in value for c in "\0\r\n")):
             raise ValueError("文件路径设置无效")
         with self.lock:
-            saved = self.read()
-            saved.setdefault(mode, {})[key] = value
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(f".{uuid4().hex}.tmp")
-            try:
-                temporary.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
-                temporary.replace(self.path)
-            finally:
-                temporary.unlink(missing_ok=True)
+            saved = self._read()
+            fields = saved.get(mode, {})
+            saved[mode] = dict(fields if isinstance(fields, dict) else {}, **{key: value})
+            self._write(saved)
+
+    def marker_resume(self):
+        resume = self._read().get("marker_resume")
+        if isinstance(resume, dict) and isinstance(resume.get("session"), str):
+            return resume
+        return None
+
+    def save_marker_resume(self, resume, completed_sessions=()):
+        with self.lock:
+            saved = self._read()
+            saved["marker_resume"] = resume
+            marker = saved.get("marker")
+            if isinstance(marker, dict) and marker.get("session") in completed_sessions:
+                marker.pop("session")
+            self._write(saved)
+
+
+def find_marker_resume(root, list_names, read_metadata, saved=None):
+    """Select only the latest marker session so completed runs clear the field."""
+    if saved:
+        path = root.joinpath(saved["session"])
+        candidates = (path,)
+    else:
+        candidates = (root / "data" / name for name in sorted(list_names(root / "data"), reverse=True)
+                      if re.fullmatch(r"\d{8}_\d{6}_\d{6}", name))
+    for path in candidates:
+        try:
+            metadata = json.loads(read_metadata(path / "capture_metadata.json"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            if saved:
+                return saved
+            continue
+        if (not isinstance(metadata, dict) or metadata.get("calibration_type") != "marker_geometry"
+                or "capture_group" not in metadata):
+            continue
+        if metadata.get("calibration_complete") or (
+            not saved and metadata.get("capture_complete") and "calibration_complete" not in metadata
+        ):
+            return None
+        result = dict(saved or {}, session=str(path), capture_complete=bool(metadata.get("capture_complete")))
+        if not saved:
+            if isinstance(metadata.get("capture_config"), str):
+                result["preset"] = metadata["capture_config"]
+            sensors = metadata.get("sensors") or []
+            if sensors and sensors[0].get("sensor_type") == "vcamera":
+                result["camera"] = "vcamera"
+        return result
+    return None
 
 
 class Studio:
-    def __init__(self, args, config):
+    def __init__(self, args, config, recent=None):
         self.args, self.config = args, config
         self.lock = Lock()
         self.logs = deque(maxlen=100)
@@ -105,6 +162,11 @@ class Studio:
         self.phase = None
         self.session = self.result = None
         self.closing = False
+        self.recent = recent
+        self.marker_resume = recent.marker_resume() if recent else None
+        self.marker_capture_options = None
+        self.completed_marker_session = None
+        self.marker_resume_revision = 0
 
     def snapshot(self):
         with self.lock:
@@ -117,9 +179,63 @@ class Studio:
                 session=self.session,
                 result=self.result,
                 logs=list(self.logs),
+                marker_resume=self.marker_resume,
+                completed_marker_session=self.completed_marker_session,
             )
         snapshot.update(self.preview_state(snapshot["running"], snapshot["url"]))
         return snapshot
+
+    def restore_marker_resume(self):
+        with self.lock:
+            revision, saved = self.marker_resume_revision, self.marker_resume
+        try:
+            if self.args.ssh:
+                from paramiko import SSHException
+
+                profile = load_profile(self.args.ssh_config, self.args.ssh)
+                root = PurePosixPath(profile["project_dir"])
+                try:
+                    with connect(profile["host"], profile["user"], profile.get("password"),
+                                 port=profile.get("port", 22)) as ssh, ssh.open_sftp() as sftp:
+                        def read_metadata(path):
+                            with sftp.open(str(path), "rb") as handle:
+                                return handle.read().decode("utf-8-sig")
+                        restored = find_marker_resume(root, lambda path: sftp.listdir(str(path)), read_metadata, saved)
+                except SSHException:
+                    return
+            else:
+                restored = find_marker_resume(
+                    PROJECT_ROOT, lambda path: [entry.name for entry in path.iterdir()],
+                    lambda path: path.read_text(encoding="utf-8-sig"), saved,
+                )
+        except (OSError, ValueError, KeyError, RuntimeError, EOFError, ImportError):
+            return
+        with self.lock:
+            if self.marker_resume_revision == revision and restored != saved:
+                completed = []
+                if saved and restored is None:
+                    completed.append(saved["session"])
+                    manual = self.recent.read().get("marker", {}).get("session") if self.recent else None
+                    if self.same_marker_session(manual, saved["session"]):
+                        completed.append(manual)
+                self.set_marker_resume(restored, completed)
+
+    def set_marker_resume(self, resume, completed_sessions=()):
+        self.marker_resume = resume
+        self.marker_resume_revision += 1
+        if self.recent:
+            try:
+                self.recent.save_marker_resume(resume, completed_sessions)
+            except OSError as error:
+                self.logs.append(f"保存 Marker 续采会话失败：{error}")
+
+    @staticmethod
+    def same_marker_session(a, b):
+        if not a or not b:
+            return False
+        a, b = (PurePosixPath(value.replace("\\", "/")) for value in (a, b))
+        return a == b or (not a.is_absolute() and a.parts == b.parts[-len(a.parts):]) or (
+            not b.is_absolute() and b.parts == a.parts[-len(b.parts):])
 
     @staticmethod
     def preview_state(running, url):
@@ -305,15 +421,27 @@ class Studio:
             self.logs.clear()
             self.phase = "solve" if offline else None
             self.session, self.result = session, None
+            self.marker_capture_options = None
+            if mode == "marker":
+                self.completed_marker_session = None
+                if command in ("run", "capture"):
+                    self.marker_capture_options = {
+                        "preset": preset or self.config[mode],
+                        "camera": camera or "",
+                        "camera_intrinsics": camera_intrinsics or "",
+                    }
             Thread(target=self.monitor, args=(process,), daemon=True).start()
 
     def monitor(self, process):
+        geometry_saved = False
         with process.stdout:
             for line in process.stdout:
                 line = line.strip()
                 with self.lock:
                     if self.mode == "marker" and line == "CALIBRATION_MARKER_PHASE=solve":
                         self.phase, self.url = "solve", None
+                        if self.marker_resume and self.same_marker_session(self.marker_resume["session"], self.session):
+                            self.set_marker_resume(dict(self.marker_resume, capture_complete=True))
                     elif self.mode == "marker" and line == "CALIBRATION_MARKER_PHASE=paused":
                         self.phase, self.url = "paused", None
                     elif line.startswith("CALIBRATION_CAPTURE_PORT="):
@@ -328,11 +456,28 @@ class Studio:
                     else:
                         if line.startswith("Capture session: "):
                             self.session = line.partition(": ")[2]
+                            if self.marker_capture_options is not None:
+                                self.set_marker_resume(dict(self.marker_capture_options, session=self.session,
+                                                            capture_complete=False))
                         if line.startswith(("Results: ", "Calibration results: ", "Saved geometry: ", "Saved OpenCV YAML: ")):
                             self.result = line.partition(": ")[2]
+                        if self.mode == "marker" and line.startswith("Saved geometry: "):
+                            geometry_saved = True
                         self.logs.append(line)
         code = process.wait()
         with self.lock:
+            if code == 0 and geometry_saved and self.session:
+                self.completed_marker_session = self.session
+                resume = self.marker_resume
+                completed = [self.session]
+                if resume and self.same_marker_session(resume["session"], self.session):
+                    completed.append(resume["session"])
+                    resume = None
+                if self.recent:
+                    manual = self.recent.read().get("marker", {}).get("session")
+                    if self.same_marker_session(manual, self.session):
+                        completed.append(manual)
+                self.set_marker_resume(resume, completed)
             self.process, self.url, self.exit_code = None, None, code
 
     def stop(self, *, shutdown=False):
@@ -374,10 +519,11 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
-    studio = Studio(args, json.loads(args.config.read_text(encoding="utf-8-sig")))
     scope = (str(args.config.resolve()), args.ssh, str(args.ssh_config) if args.ssh else None)
     scope_key = hashlib.sha256(json.dumps(scope).encode()).hexdigest()[:24]
     recent = RecentPaths(PROJECT_ROOT / "configs" / "studio.local" / f"{scope_key}.json")
+    studio = Studio(args, json.loads(args.config.read_text(encoding="utf-8-sig")), recent)
+    Thread(target=studio.restore_marker_resume, daemon=True).start()
     page = Path(__file__).with_suffix(".html").read_bytes()
 
     class Handler(BaseHTTPRequestHandler):

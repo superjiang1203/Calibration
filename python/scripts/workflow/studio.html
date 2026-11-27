@@ -145,7 +145,14 @@ let state = {};
 let busy = false;
 let actionError = '';
 let exiting = false;
+let markerSessionEdited = false;
 const values = Object.fromEntries(Object.keys(modes).map(mode => [mode, {}]));
+function restoreMarkerSession(next, previous) {
+    if (!next || (markerSessionEdited && values.marker.session !== previous?.session)) return;
+    for (const key of ['session', 'preset', 'camera', 'camera_intrinsics']) {
+        if (typeof next[key] === 'string') values.marker[key] = next[key];
+    }
+}
 function saveRecentPath(mode, key, value) {
     fetch('/recent-path', {
         method: 'POST', keepalive: true,
@@ -171,8 +178,13 @@ function renderPanel() {
         ? [['capture', '打开 RGB 预览'], ['factory', '读取出厂内参', 'factory_output']]
         : useFactoryImu ? [['preview', '打开 IMU 预览', 'geometry']] : mode.actions;
     byId('modeTitle').textContent = nav.find(button => button.dataset.mode === selected).textContent;
+    const resume = state.marker_resume;
+    const markerHint = selected === 'marker' && resume && resume.session === values.marker.session
+        ? (resume.capture_complete ? ' 已恢复未完成求解的会话，请点击「标定已有会话」。'
+            : ' 已恢复上次会话，请保持中断时的靶标摆位并点击「继续采集」。') : '';
     byId('modeHelp').textContent = factoryMode ? 'Vcamera 使用 SDK 出厂内参。可打开 RGB 预览，或导出当前采集模式的内参 YAML。'
         : selectedCamera === 'vcamera' && (cameraOverride || useFactoryImu) ? mode.help + ' Vcamera 内参由 SDK 自动读取。' : mode.help;
+    byId('modeHelp').textContent += markerHint;
     byId('fields').replaceChildren(...visibleFields.map(key => {
         const [title, hint] = inputs[key];
         const label = document.createElement('label');
@@ -204,6 +216,7 @@ function renderPanel() {
         }
         field.addEventListener('input', () => {
             values[selected][key] = field.value;
+            if (selected === 'marker' && key === 'session') markerSessionEdited = true;
             if (key === 'imu_source') {
                 renderPanel();
                 return;
@@ -338,10 +351,24 @@ async function refresh() {
         const previous = state;
         state = await response.json();
         if (exiting) return;
-        if (state.session && state.mode && state.session !== previous.session) {
+        if (state.session && state.mode && state.mode !== 'marker' && state.session !== previous.session) {
             values[state.mode].session = state.session;
             if (selected === state.mode) renderPanel();
         }
+        const oldResume = previous.marker_resume;
+        const newResume = state.marker_resume;
+        let markerChanged = JSON.stringify(oldResume) !== JSON.stringify(newResume);
+        if (markerChanged) {
+            if (state.running && state.mode === 'marker') markerSessionEdited = false;
+            restoreMarkerSession(newResume, oldResume);
+            if (!newResume && oldResume && values.marker.session === oldResume.session) values.marker.session = '';
+        }
+        if (state.completed_marker_session && state.completed_marker_session !== previous.completed_marker_session
+                && values.marker.session === state.completed_marker_session) {
+            values.marker.session = '';
+            markerChanged = true;
+        }
+        if (selected === 'marker' && markerChanged) renderPanel();
         updateControls();
         const name = nav.find(button => button.dataset.mode === state.mode)?.textContent || '';
         byId('stop').hidden = !(state.running && state.mode === 'imu');
@@ -378,10 +405,13 @@ renderPanel();
 fetch('/presets').then(response => response.json()).then(({target, presets, recent_paths}) => {
     byId('target').textContent = target;
     for (const mode of Object.keys(modes)) {
-        Object.assign(values[mode], recent_paths?.[mode]);
+        for (const [key, value] of Object.entries(recent_paths?.[mode] || {})) {
+            values[mode][key] ??= value;
+        }
         const preset = presets[mode];
         if (typeof preset === 'string') values[mode].preset ??= preset;
     }
+    restoreMarkerSession(state.marker_resume);
     values.imu.geometry ??= presets.imu?.geometry;
     values.imu.imu_source ??= presets.imu?.source || 'icm42670';
     values.imu.imu_port ??= presets.imu?.rion?.port || 'auto';

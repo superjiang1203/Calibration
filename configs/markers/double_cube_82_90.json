@@ -18,12 +18,9 @@
       90
     ],
     "reference_marker_id": 90,
-    "capture_groups": [
-      [90, 82, 83],
-      [82, 83, 84],
-      [84, 85, 86],
-      [86, 87, 88],
-      [88, 89, 82]
+    "capture_layers": [
+      [89, 88, 87, 86],
+      [85, 84, 83, 82]
     ],
     "reference_marker_length_mm": null,
     "length_source": "checkerboard_35_mm",

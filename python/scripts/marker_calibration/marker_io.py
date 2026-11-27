@@ -48,7 +48,7 @@ def load_config(path):
         None if config['sensor']['sensor_type'] == 'vcamera' else resolve_config_path('camera_parameters')
     )
     marker = config['marker']
-    if set(marker) - {'dictionary', 'expected_count', 'ids', 'reference_marker_id', 'reference_marker_length_mm', 'length_source', 'geometry_model', 'checkerboard', 'capture_groups'}:
+    if set(marker) - {'dictionary', 'expected_count', 'ids', 'reference_marker_id', 'reference_marker_length_mm', 'length_source', 'geometry_model', 'checkerboard', 'capture_groups', 'capture_layers'}:
         raise ValueError('Unknown marker settings')
     model = marker.setdefault('geometry_model', 'square')
     if model not in ('square', 'rectangle'):
@@ -106,6 +106,15 @@ def load_config(path):
     if options['min_group_views'] < max(4, options['validation_stride']):
         raise ValueError('min_group_views must allow training and at least one held-out view')
     groups = marker.get('capture_groups')
+    layers = marker.get('capture_layers')
+    if layers is not None:
+        if (board is None or groups is not None or options['min_groups'] != 5
+                or not isinstance(layers, list) or len(layers) != 2
+                or any(not isinstance(layer, list) or len(layer) != 4
+                       or any(type(mid) is not int for mid in layer) for layer in layers)
+                or len(set(layers[0] + layers[1])) != 8
+                or set(layers[0] + layers[1]) != set(ids) - {reference}):
+            raise ValueError('marker.capture_layers requires two ordered rings of four side IDs and a separate top ID')
     if groups is not None:
         if (board is None or not isinstance(groups, list) or len(groups) != options['min_groups']
                 or any(not isinstance(group, list) or len(group) < 2

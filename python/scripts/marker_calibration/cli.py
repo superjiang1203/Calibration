@@ -97,6 +97,7 @@ def main(argv=None):
                 raise ValueError(f'Session does not exist: {session}')
         camera_path = config['camera_parameters']
         metadata_path = session / 'capture_metadata.json'
+        metadata = None
         if metadata_path.is_file():
             metadata = json.loads(metadata_path.read_text(encoding='utf-8-sig'))
             if metadata.get('calibration_type') == 'marker_geometry':
@@ -160,6 +161,13 @@ def main(argv=None):
                       optimization_method=method,
                       reference_marker_length_fixed=model == 'square',
                       dimensions=report.get('marker_dimensions_mm'))
+        if metadata and metadata.get('calibration_type') == 'marker_geometry':
+            metadata['calibration_complete'] = True
+            metadata['geometry_result'] = str(destination)
+            try:
+                write_json(metadata_path, metadata)
+            except OSError as error:
+                print(f'Geometry saved, but could not update capture session status: {error}', file=sys.stderr, flush=True)
         print(f'Saved geometry: {destination}', flush=True)
         return 0
     except (ValueError, KeyError, TypeError, OSError, RuntimeError, ImportError, cv2.error) as error:

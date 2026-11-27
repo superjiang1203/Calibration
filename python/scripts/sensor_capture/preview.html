@@ -333,7 +333,20 @@ async function refresh() {
             const count = g.minimum_images ? `${g.images}/${g.minimum_images}` : g.images;
             groupStatus.textContent = `第 ${g.group} 组 · 达标 ${g.ready_groups}/${g.minimum_groups} 组 · 本组 ${count} 张有效图 · 已拍足 ${g.qualified.join('、') || '—'} · 共视码 ${g.bridge.join('、') || '—'} · 待覆盖 ${g.missing.join('、') || '—'}。`
                 + (g.complete ? ' 覆盖完成，可以标定。' : g.ready ? ' 本组就绪，可切到下一组。' : ' 请继续移动相机采集。');
-            if (g.planned_ids?.length) {
+            if (g.layered) {
+                if (g.group === 1) {
+                    groupStatus.textContent += ' 从上方斜拍，每张保留顶部码和任意一个侧码。';
+                    if (g.handoff_id != null) groupStatus.textContent += ` 已选交接码 ${g.handoff_id}。`;
+                } else {
+                    groupStatus.textContent += ` 从侧面近水平拍摄，以 ${g.aim_id} 所在面为目标。当前组 ${g.planned_ids.join('、')}，待拍足 ${g.pending_ids.join('、') || '—'}。`;
+                    if (!g.co_visibility_ready) groupStatus.textContent += ' 保持靶标不动，沿相邻面移动相机，让相邻码出现在同一张图中。';
+                }
+                if (g.next_ids.length) {
+                    groupStatus.textContent += g.group === 1
+                        ? ` 下一组建议从 ${g.next_ids.join(' → ')} 依次取得共视。`
+                        : ` 下一组 ${g.next_ids.join('、')}。转向下一相邻侧面，保留交接码。`;
+                }
+            } else if (g.planned_ids?.length) {
                 const angle = g.group === 1 ? '从上方斜拍，保留顶码和侧码' : '从侧面拍，以本组中间码为中心小幅左右移动';
                 groupStatus.textContent += ` 当前组 ${g.planned_ids.join('、')}，待拍足 ${g.pending_ids.join('、') || '—'}。${angle}。`;
                 if (g.next_ids.length) {
