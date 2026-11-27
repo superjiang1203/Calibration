@@ -48,7 +48,7 @@ def load_config(path):
         None if config['sensor']['sensor_type'] == 'vcamera' else resolve_config_path('camera_parameters')
     )
     marker = config['marker']
-    if set(marker) - {'dictionary', 'expected_count', 'ids', 'reference_marker_id', 'reference_marker_length_mm', 'length_source', 'geometry_model', 'checkerboard', 'capture_groups', 'capture_layers'}:
+    if set(marker) - {'dictionary', 'expected_count', 'ids', 'reference_marker_id', 'reference_marker_length_mm', 'length_source', 'geometry_model', 'checkerboard', 'capture_groups', 'capture_layers', 'capture_side_ring'}:
         raise ValueError('Unknown marker settings')
     model = marker.setdefault('geometry_model', 'square')
     if model not in ('square', 'rectangle'):
@@ -115,6 +115,11 @@ def load_config(path):
                 or len(set(layers[0] + layers[1])) != 8
                 or set(layers[0] + layers[1]) != set(ids) - {reference}):
             raise ValueError('marker.capture_layers requires two ordered rings of four side IDs and a separate top ID')
+    ring = marker.get('capture_side_ring')
+    if ring is not None and (layers is None or not isinstance(ring, list) or len(ring) != 8
+                             or any(type(mid) is not int for mid in ring)
+                             or ring[::2] != layers[0] or set(ring[1::2]) != set(layers[1])):
+        raise ValueError('marker.capture_side_ring must alternate upper and lower IDs in physical order, starting at the first upper ID')
     if groups is not None:
         if (board is None or not isinstance(groups, list) or len(groups) != options['min_groups']
                 or any(not isinstance(group, list) or len(group) < 2

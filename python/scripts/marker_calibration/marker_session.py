@@ -59,6 +59,7 @@ class CaptureGroups:
         layout = metadata.get('marker', marker)
         self.plan = layout.get('capture_groups')
         self.layers = layout.get('capture_layers')
+        self.side_ring = layout.get('capture_side_ring')
         self.options = options
         self.metadata = metadata
         if camera is not None:
@@ -99,6 +100,15 @@ class CaptureGroups:
                 and angle >= self.options['min_view_angle_deg']}
 
     def side_plan(self, handoff):
+        if self.side_ring:
+            ring = self.side_ring
+            sector = ring.index(handoff)
+            forward = ring[:sector + 1][::-1]
+            backward = [handoff, *ring[sector + 1:], ring[0]]
+            route = min((forward, backward), key=len)
+            sides = [[ring[index - 1], ring[index], ring[index + 1]] for index in range(0, 8, 2)]
+            sides[0] = list(dict.fromkeys([*route, *sides[0]]))
+            return [[self.reference, handoff], *sides]
         upper, lower = self.layers
         sector = upper.index(handoff) if handoff in upper else lower.index(handoff)
         route = [upper[index] for index in range(sector + 1)] if sector <= 2 else [upper[0], upper[3]]
@@ -115,7 +125,11 @@ class CaptureGroups:
         qualified = self.qualified(0)
         if self.reference not in qualified:
             return None
-        order = [mid for index in (0, 1, 3, 2) for mid in (upper[index], lower[index])]
+        if self.side_ring:
+            ring = self.side_ring
+            order = sorted(ring, key=lambda mid: min(ring.index(mid), len(ring) - ring.index(mid)))
+        else:
+            order = [mid for index in (0, 1, 3, 2) for mid in (upper[index], lower[index])]
         records = self.records(0)
         return next((mid for mid in order if mid in qualified and
                      self.connected_in_group(records, [self.reference, mid])), None)
@@ -374,7 +388,7 @@ def _capture_session(config, session, camera, resume, view):
     if config['marker'].get('checkerboard'):
         saved_marker = metadata['marker']
         current_marker = config['marker']
-        plan_keys = {'capture_groups', 'capture_layers'}
+        plan_keys = {'capture_groups', 'capture_layers', 'capture_side_ring'}
         if resume and ({key: value for key, value in saved_marker.items() if key not in plan_keys} !=
                        {key: value for key, value in current_marker.items() if key not in plan_keys}):
             raise ValueError('Resume requires the same marker and checkerboard settings')
@@ -384,15 +398,23 @@ def _capture_session(config, session, camera, resume, view):
         groups = CaptureGroups(config['marker'], config['calibration'], metadata, camera)
         if resume and 'capture_layers' in current_marker and not groups.layers and groups.index <= 1:
             groups.layers = current_marker['capture_layers']
+            groups.side_ring = current_marker.get('capture_side_ring')
             handoff = groups.select_handoff() if groups.index else None
             if not groups.index or handoff is not None:
                 saved_marker.pop('capture_groups', None)
                 saved_marker['capture_layers'] = groups.layers
+                if groups.side_ring:
+                    saved_marker['capture_side_ring'] = groups.side_ring
                 groups.plan = None
                 if handoff is not None:
                     metadata['capture_handoff_id'] = handoff
             else:
                 groups.layers = None
+                groups.side_ring = None
+        elif (resume and groups.layers == current_marker.get('capture_layers')
+              and not groups.side_ring and current_marker.get('capture_side_ring') and groups.index <= 1):
+            groups.side_ring = current_marker['capture_side_ring']
+            saved_marker['capture_side_ring'] = groups.side_ring
         if resume:
             short = [i + 1 for i in range(groups.index)
                      if len(groups.records(i)) < groups.options['min_group_views']]

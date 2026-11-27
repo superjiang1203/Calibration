@@ -22,6 +22,7 @@
       [89, 88, 87, 86],
       [85, 84, 83, 82]
     ],
+    "capture_side_ring": [89, 83, 88, 82, 87, 85, 86, 84],
     "reference_marker_length_mm": null,
     "length_source": "checkerboard_35_mm",
     "geometry_model": "rectangle",

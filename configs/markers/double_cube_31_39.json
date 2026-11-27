@@ -18,6 +18,10 @@
       39
     ],
     "reference_marker_id": 39,
+    "capture_layers": [
+      [38, 37, 36, 35],
+      [34, 33, 32, 31]
+    ],
     "reference_marker_length_mm": null,
     "length_source": "checkerboard_35_mm",
     "geometry_model": "rectangle",

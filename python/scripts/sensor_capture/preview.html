@@ -343,7 +343,7 @@ async function refresh() {
                 }
                 if (g.next_ids.length) {
                     groupStatus.textContent += g.group === 1
-                        ? ` 下一组建议从 ${g.next_ids.join(' → ')} 依次取得共视。`
+                        ? ` 下一组必拍 ${g.next_ids.join('、')}。从交接码所在面开始，沿相邻面移动到下一组的目标面。`
                         : ` 下一组 ${g.next_ids.join('、')}。转向下一相邻侧面，保留交接码。`;
                 }
             } else if (g.planned_ids?.length) {
