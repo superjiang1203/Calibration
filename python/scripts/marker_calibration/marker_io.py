@@ -48,7 +48,7 @@ def load_config(path):
         None if config['sensor']['sensor_type'] == 'vcamera' else resolve_config_path('camera_parameters')
     )
     marker = config['marker']
-    if set(marker) - {'dictionary', 'expected_count', 'ids', 'reference_marker_id', 'reference_marker_length_mm', 'length_source', 'geometry_model', 'checkerboard'}:
+    if set(marker) - {'dictionary', 'expected_count', 'ids', 'reference_marker_id', 'reference_marker_length_mm', 'length_source', 'geometry_model', 'checkerboard', 'capture_groups'}:
         raise ValueError('Unknown marker settings')
     model = marker.setdefault('geometry_model', 'square')
     if model not in ('square', 'rectangle'):
@@ -105,6 +105,17 @@ def load_config(path):
         raise ValueError('Insufficient coverage or validation settings')
     if options['min_group_views'] < max(4, options['validation_stride']):
         raise ValueError('min_group_views must allow training and at least one held-out view')
+    groups = marker.get('capture_groups')
+    if groups is not None:
+        if (board is None or not isinstance(groups, list) or len(groups) != options['min_groups']
+                or any(not isinstance(group, list) or len(group) < 2
+                       or any(type(mid) is not int or mid not in ids for mid in group)
+                       or len(set(group)) != len(group) for group in groups)):
+            raise ValueError('Invalid marker.capture_groups')
+        if (reference not in groups[0] or any(reference in group for group in groups[1:])
+                or set().union(*map(set, groups)) != set(ids)
+                or any(not set(a).intersection(b) for a, b in zip(groups, groups[1:]))):
+            raise ValueError('Capture plan needs the reference in group 1, adjacent overlap and full ID coverage')
     if not 0 < options['min_length_ratio'] < 1 < options['max_length_ratio'] or options['max_outlier_fraction'] >= 0.5:
         raise ValueError('Invalid length bounds or outlier fraction')
     output = config['output']

@@ -191,7 +191,7 @@ class CaptureView:
                 if self.path == "/save" and not view.can_save():
                     self.send_error(409, "Waiting for all required camera frames")
                     return
-                if self.path == "/group/next" and not (view.group_status and view.group_status["ready"]):
+                if self.path == "/group/next" and not (view.group_status and view.group_status["can_advance"]):
                     self.send_error(409, "Current group is incomplete")
                     return
                 if self.path.startswith("/video/"):

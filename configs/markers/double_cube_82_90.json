@@ -18,6 +18,13 @@
       90
     ],
     "reference_marker_id": 90,
+    "capture_groups": [
+      [90, 82, 83],
+      [82, 83, 84],
+      [84, 85, 86],
+      [86, 87, 88],
+      [88, 89, 82]
+    ],
     "reference_marker_length_mm": null,
     "length_source": "checkerboard_35_mm",
     "geometry_model": "rectangle",
@@ -51,7 +58,7 @@
     "filename": "double_cube_geometry.yaml",
     "instrument": {
       "id": "calibrated-double-cube",
-      "display_name": "双立方体靶标 ID 81–90",
+      "display_name": "双立方体靶标 ID 82–90",
       "enabled": true,
       "sort_order": 100,
       "model": "marked_object",

@@ -55,6 +55,7 @@ class CaptureGroups:
 
         self.ids = set(marker['ids'])
         self.reference = marker['reference_marker_id']
+        self.plan = metadata['marker'].get('capture_groups') if 'marker' in metadata else marker.get('capture_groups')
         self.options = options
         self.metadata = metadata
         if camera is not None:
@@ -105,6 +106,11 @@ class CaptureGroups:
         ready = len(records) >= minimum and len(qualified) >= 2 and (
             bool(bridge) if self.index else self.reference in qualified
         )
+        planned = self.plan[self.index] if self.plan and self.index < len(self.plan) else []
+        next_plan = self.plan[self.index + 1] if self.plan and self.index + 1 < len(self.plan) else []
+        if planned:
+            bridge = set(planned).intersection(self.plan[self.index - 1]) if self.index else set()
+            ready = len(records) >= minimum and set(planned) <= qualified
         ready_groups = self.index + int(ready)
         return {
             'group': self.index + 1, 'images': len(records), 'minimum_images': minimum, 'ready': ready,
@@ -114,6 +120,8 @@ class CaptureGroups:
                         and train_total >= self.options['min_views'],
             'missing': missing, 'qualified': sorted(qualified), 'bridge': sorted(bridge),
             'previous': sorted(previous),
+            'planned_ids': planned, 'pending_ids': [mid for mid in planned if mid not in qualified],
+            'next_ids': next_plan, 'can_advance': ready and (not self.plan or bool(next_plan)),
         }
 
     def board_pose(self, image, records):
@@ -139,10 +147,12 @@ class CaptureGroups:
         pose = self.board_pose(image, records)
         corners, _ = detect(image, detector)
         visible = {mid: corners[mid] for mid in sorted(self.ids & corners.keys())}
-        if len(visible) < 2:
-            raise ValueError('Show at least two target markers')
         status = self.status()
-        if not status['ready'] and self.index and not set(status['previous']).intersection(visible):
+        if status['planned_ids']:
+            visible = {mid: points for mid, points in visible.items() if mid in status['planned_ids']}
+        if len(visible) < 2:
+            raise ValueError(f'Show at least two target markers from {status["planned_ids"] or sorted(self.ids)}')
+        if not status['planned_ids'] and not status['ready'] and self.index and not set(status['previous']).intersection(visible):
             raise ValueError(f'Keep an overlap marker visible from {status["previous"]}')
         if not self.index and self.reference not in visible:
             raise ValueError(f'Show top ID {self.reference} together with a side marker in group 1')
@@ -306,7 +316,11 @@ def _capture_session(config, session, camera, resume, view):
             shutil.copyfile(config['camera_parameters'], session_camera_path)
     groups = None
     if config['marker'].get('checkerboard'):
-        if resume and ('capture_group' not in metadata or metadata['marker'] != config['marker']):
+        saved_marker = metadata['marker']
+        current_marker = config['marker']
+        if 'capture_groups' not in saved_marker:
+            current_marker = {key: value for key, value in current_marker.items() if key != 'capture_groups'}
+        if resume and ('capture_group' not in metadata or saved_marker != current_marker):
             raise ValueError('Resume requires an existing grouped capture with the same marker and checkerboard settings')
         metadata.setdefault('capture_group', 0)
         groups = CaptureGroups(config['marker'], config['calibration'], metadata, camera)
@@ -403,10 +417,17 @@ def _capture_session(config, session, camera, resume, view):
                     f'Group {status["group"]}: {status["images"]} saved   Ready groups: '
                     f'{status["ready_groups"]}/{status["minimum_groups"]}',
                     f'Missing overall: {status["missing"]}   Bridge IDs: {status["bridge"]}',
-                    'N: next group, then move target' if status['ready'] else
-                    (f'Show top {groups.reference} + side' if not groups.index else
-                     f'Keep overlap with earlier groups: {status["previous"]}'),
                 ]
+                if status['planned_ids']:
+                    lines.append(f'Planned IDs: {status["planned_ids"]}   Still needed: {status["pending_ids"]}')
+                if status['complete']:
+                    lines.append('Q/ESC: finish capture')
+                elif status['can_advance']:
+                    next_ids = f' {status["next_ids"]}' if status['next_ids'] else ''
+                    lines.append(f'N: next group{next_ids}, then move target')
+                elif not status['planned_ids']:
+                    lines.append(f'Show top {groups.reference} + side' if not groups.index else
+                                 f'Keep overlap with earlier groups: {status["previous"]}')
                 if not view.web and view.marker_distances['mm']:
                     ranges = [f'{mid} ~{mm:.0f}' if mm is not None else f'{mid} --'
                               for mid, mm in view.marker_distances['mm'].items()]
@@ -424,8 +445,11 @@ def _capture_session(config, session, camera, resume, view):
             if key in (27, ord('q'), ord('Q')):
                 break
             if groups and key in (ord('n'), ord('N')):
-                if not view.group_status['ready']:
-                    view.log('Current group is incomplete. Continue moving the camera and check the ready IDs.')
+                if not view.group_status['can_advance']:
+                    if view.group_status['complete']:
+                        view.log('All planned groups are ready. Finish capture to calibrate.')
+                    else:
+                        view.log('Current group is incomplete. Continue moving the camera and check the ready IDs.')
                     continue
                 metadata['capture_group'] += 1
                 view.group_status = groups.status()
@@ -434,8 +458,10 @@ def _capture_session(config, session, camera, resume, view):
                 view.marker_save_feedback = None
                 next_distance_update = 0
                 write_json(session / 'capture_metadata.json', metadata)
-                view.log(f'Group {groups.index + 1} opened. Reposition the target now, then keep it still. '
-                         f'Keep an overlap ID from {view.group_status["previous"]}.')
+                status = view.group_status
+                group_guide = (f'Capture IDs {status["planned_ids"]}, including overlap {status["bridge"]}.'
+                               if status['planned_ids'] else f'Keep an overlap ID from {status["previous"]}.')
+                view.log(f'Group {groups.index + 1} opened. Reposition the target now, then keep it still. {group_guide}')
                 continue
             if key in (32, ord('c'), ord('C')):
                 allowed = config['marker']['ids']

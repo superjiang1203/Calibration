@@ -303,7 +303,7 @@ async function refresh() {
         document.querySelector('#captureTitle').textContent = document.title = state.title || '相机采集';
         renderDevices(state.devices);
         nextGroup.hidden = !state.group;
-        nextGroup.disabled = !state.group?.ready;
+        nextGroup.disabled = !state.group?.can_advance;
         video.hidden = !state.video_enabled;
         videoRecording = Boolean(state.video_recording);
         const videoPending = Boolean(state.video_requested) !== videoRecording;
@@ -333,6 +333,14 @@ async function refresh() {
             const count = g.minimum_images ? `${g.images}/${g.minimum_images}` : g.images;
             groupStatus.textContent = `第 ${g.group} 组 · 达标 ${g.ready_groups}/${g.minimum_groups} 组 · 本组 ${count} 张有效图 · 已拍足 ${g.qualified.join('、') || '—'} · 共视码 ${g.bridge.join('、') || '—'} · 待覆盖 ${g.missing.join('、') || '—'}。`
                 + (g.complete ? ' 覆盖完成，可以标定。' : g.ready ? ' 本组就绪，可切到下一组。' : ' 请继续移动相机采集。');
+            if (g.planned_ids?.length) {
+                const angle = g.group === 1 ? '从上方斜拍，保留顶码和侧码' : '从侧面拍，以本组中间码为中心小幅左右移动';
+                groupStatus.textContent += ` 当前组 ${g.planned_ids.join('、')}，待拍足 ${g.pending_ids.join('、') || '—'}。${angle}。`;
+                if (g.next_ids.length) {
+                    groupStatus.textContent += ` 下一组 ${g.next_ids.join('、')}。` +
+                        (g.group === 1 ? '降低视角到侧面，保留与顶部组共视的侧码。' : '沿编号递增方向转过两个侧面，保留交接码。');
+                }
+            }
         }
         const connected = state.state === 'connected';
         stateLabel.textContent = ({disconnected:'已断开', connecting:'正在连接', connected:'已连接', disconnecting:'正在断开', failed:'连接失败'})[state.state];
