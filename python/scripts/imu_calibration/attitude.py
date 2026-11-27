@@ -24,14 +24,16 @@ def quaternion_matrix(wxyz):
 
 
 class ImuState:
-    def __init__(self):
+    def __init__(self, source="icm42670"):
         self.lock = threading.Lock()
         self.samples = {}
-        self.source = "icm42670"
+        self.source = source
+        self.available_sources = ("rion_imu406",) if source == "rion_imu406" else ("icm42670", "jy931")
         self.alignment = None
         self.connected = False
         self.received = 0.0
         self.jy_status = None
+        self.rion_status = None
         self.count = 0
         self.arrivals = {}
 
@@ -41,19 +43,20 @@ class ImuState:
         with self.lock:
             if kind == "attitude":
                 source = packet.get("source")
-                if source not in ("icm42670", "jy931"):
+                if source not in self.available_sources:
                     raise ValueError("Unknown IMU source")
                 r = quaternion_matrix(packet["quaternion_wxyz"])
                 q = np.asarray(packet["quaternion_wxyz"], float)
                 lag = float(packet.get("relay_age_ms", 0))
                 if not math.isfinite(lag) or not 0 <= lag <= 10000:
                     raise ValueError("Invalid sample age")
-                timestamp = int(packet["device_timestamp_ms"])
+                timestamp_key = "host_timestamp_ms" if source == "rion_imu406" else "device_timestamp_ms"
+                timestamp = int(packet[timestamp_key])
                 old = self.samples.get(source)
                 # Reboot/wrapped device time invalidates a display reference.
                 if (
                     old
-                    and timestamp < old["device_timestamp_ms"]
+                    and timestamp < old[timestamp_key]
                     and source == self.source
                 ):
                     self.alignment = None
@@ -61,10 +64,13 @@ class ImuState:
                     quaternion_wxyz=(q / np.linalg.norm(q)).tolist(),
                     matrix=r.tolist(),
                     valid=bool(packet.get("valid", False)),
-                    device_timestamp_ms=timestamp,
                     received=now,
                     relay_age_ms=lag,
                 )
+                self.samples[source][timestamp_key] = timestamp
+                if source == "rion_imu406":
+                    for key in ("acceleration_g", "angular_velocity_deg_s"):
+                        self.samples[source][key] = packet[key]
                 self.count += 1
                 self.arrivals.setdefault(source, deque(maxlen=150)).append(now)
                 self.samples[source]["sdk_receive_hz"] = float(
@@ -84,6 +90,13 @@ class ImuState:
                         "checksum_error_count",
                     )
                 }
+            elif kind == "rion_status" and self.source == "rion_imu406":
+                self.rion_status = {key: packet.get(key) for key in ("state", "message")}
+                if self.rion_status["state"] == "disconnected":
+                    self.connected = False
+                    self.alignment = None
+                    self.samples.pop(self.source, None)
+                    self.arrivals.pop(self.source, None)
             else:
                 raise ValueError("Unknown telemetry packet")
             self.received = now
@@ -129,6 +142,7 @@ class ImuState:
                 display = ((self.alignment @ r) if registered else r).tolist()
             return dict(
                 source=self.source,
+                available_sources=self.available_sources,
                 connected=self.connected and now - self.received < 2,
                 sources=sources,
                 selected=selected,
@@ -139,6 +153,7 @@ class ImuState:
                 absolute_orientation_comparison_valid=False,
                 received_samples=self.count,
                 jy931_status=self.jy_status,
+                rion_status=self.rion_status,
                 timing_note="Host-receive alignment; camera and IMU are not hardware synchronized",
                 note="Single pose assumes coincident mounting axes; not an IMU-to-marker extrinsic calibration",
             )
@@ -157,7 +172,7 @@ class ImuState:
     def reset(self, source=None):
         with self.lock:
             if source is not None:
-                if source not in ("icm42670", "jy931"):
+                if source not in self.available_sources:
                     raise ValueError("Unknown IMU source")
                 self.source = source
             self.alignment = None

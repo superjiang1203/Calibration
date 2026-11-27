@@ -32,6 +32,8 @@ python python/scripts/calibrate.py studio --ssh camera-lab
 
 Marker、竖轴定位和 IMU 页可以选择 Galaxy 或 Vcamera。选 Vcamera 时，连接设备后由 SDK 读取当前采集模式的出厂内参，页面无需填写内参路径。Marker 和竖轴会将内参写入会话的 `camera_params.yml`，供续采或离线求解。选 Galaxy 时使用对应设备和分辨率的标定 YAML。SSH 模式下 Marker 和竖轴的 Galaxy 内参路径以远端工程为准，IMU 的 Galaxy 内参从本机读取。
 
+使用瑞芬 IMU406 时，在 IMU 预览选择「瑞芬 IMU406」，填写 **运行 Studio 的主机**上的串口，例如 Windows 的 `COM5` 或 Linux 的 `/dev/ttyUSB0`。只有一个 USB 串口时可保留 `auto`。通过 SSH 使用远端相机时，IMU 仍接在启动 Studio 的主机上。串口默认使用 RION 68 协议、115200 波特、8N1、设备地址 0，可在 `configs/studio.json` 的 `imu.rion` 中调整。页面显示姿态、三轴加速度和三轴角速度。模块的 TTL 接口为 3.3 V，接电脑时使用配套 USB 转接器或兼容的 3.3 V USB–TTL 转接器。
+
 Galaxy 和 Vcamera 配对时，程序在同一采集轮次读取两路图像。采集时保持棋盘和相机静止，两路的曝光时刻由各自设备决定。
 
 Marker 页默认使用 [double_cube_82_90.json](configs/markers/double_cube_82_90.json) 中的 **ID 81–90**、**11×8 内角点**和 **35 mm 棋盘间距**。同一组内保持棋盘和靶标静止，移动相机。第一组的每张有效图都要拍到完整棋盘、顶部 **ID 90** 和至少一个侧码。每组至少保存 **10 张有效图**，默认每第 5 张作为留出图。每个拍足的码还需要 **5 张训练图、1 张留出图和至少 10° 视差**。本组就绪后，点「下一组」或按 **N** 再换靶标姿态。导航棒相对棋盘的位姿可以随组改变，后续组至少拍足一个已覆盖的共视码，ID 90 可不出现。

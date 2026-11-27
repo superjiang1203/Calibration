@@ -94,7 +94,9 @@ const inputs = {
     frame: ['测试帧保存路径', 'output/vcamera_test.png'],
     camera: ['采集相机', ''],
     camera_intrinsics: ['所选相机的内参 YAML（执行主机）', 'output/…/intrinsics.yml'],
-    factory_output: ['出厂内参保存路径', 'output/vcamera_factory.yml']
+    factory_output: ['出厂内参保存路径', 'output/vcamera_factory.yml'],
+    imu_source: ['IMU 数据源', ''],
+    imu_port: ['IMU406 串口（Studio 所在主机）', 'auto、COM5 或 /dev/ttyUSB0']
 };
 const sensorActions = [
     ['run', '采集并标定'], ['capture', '只采集原图'],
@@ -129,7 +131,7 @@ const modes = {
     },
     imu: {
         help: '在工作台查看视觉与 IMU 姿态。SSH 模式使用这里指定的本机 YAML 文件。',
-        fields: ['camera', 'geometry', 'intrinsics'], actions: [['preview', '打开 IMU 预览', 'geometry', 'intrinsics']]
+        fields: ['camera', 'imu_source', 'geometry', 'intrinsics'], actions: [['preview', '打开 IMU 预览', 'geometry', 'intrinsics']]
     },
     vcamera: {
         help: '打开图漾 RGB 实时预览，也可以枚举设备、检查控制项或保存测试帧。',
@@ -161,18 +163,21 @@ function renderPanel() {
     const useFactoryImu = selected === 'imu' && selectedCamera === 'vcamera';
     const factoryMode = selected === 'intrinsics' && selectedCamera === 'vcamera';
     const fields = factoryMode ? ['camera', 'preset', 'factory_output']
-        : useFactoryImu ? ['camera', 'geometry']
+        : useFactoryImu ? ['camera', 'imu_source', 'geometry']
         : cameraOverride === 'galaxy' ? [...mode.fields, 'camera_intrinsics'] : mode.fields;
+    const visibleFields = selected === 'imu' && values.imu.imu_source === 'rion_imu406'
+        ? [...fields, 'imu_port'] : fields;
     const actions = factoryMode
         ? [['capture', '打开 RGB 预览'], ['factory', '读取出厂内参', 'factory_output']]
         : useFactoryImu ? [['preview', '打开 IMU 预览', 'geometry']] : mode.actions;
     byId('modeTitle').textContent = nav.find(button => button.dataset.mode === selected).textContent;
     byId('modeHelp').textContent = factoryMode ? 'Vcamera 使用 SDK 出厂内参。可打开 RGB 预览，或导出当前采集模式的内参 YAML。'
         : selectedCamera === 'vcamera' && (cameraOverride || useFactoryImu) ? mode.help + ' Vcamera 内参由 SDK 自动读取。' : mode.help;
-    byId('fields').replaceChildren(...fields.map(key => {
+    byId('fields').replaceChildren(...visibleFields.map(key => {
         const [title, hint] = inputs[key];
         const label = document.createElement('label');
-        const field = document.createElement(key === 'camera' ? 'select' : 'input');
+        const isSelect = key === 'camera' || key === 'imu_source';
+        const field = document.createElement(isSelect ? 'select' : 'input');
         const previewTracking = ['galaxy', 'vcamera'].includes(selected);
         const trackingTitle = key === 'geometry' ? 'Marker 几何或末端 YAML（执行主机，可选）'
             : key === 'intrinsics' ? '追踪用相机内参 YAML（执行主机）' : title;
@@ -184,16 +189,23 @@ function renderPanel() {
             field.add(new Option(defaultName, ''));
             if (['marker', 'pivot'].includes(selected)) field.add(new Option('Galaxy 灰度', 'galaxy'));
             field.add(new Option('Vcamera RGB', 'vcamera'));
+        } else if (key === 'imu_source') {
+            field.add(new Option('ICM42670 / JY931', 'icm42670'));
+            field.add(new Option('瑞芬 IMU406', 'rion_imu406'));
         } else {
             field.placeholder = hint;
         }
         field.value = values[selected][key] || '';
-        if (key !== 'camera') {
+        if (!isSelect) {
             const mode = selected;
             field.addEventListener('change', () => saveRecentPath(mode, key, field.value));
         }
         field.addEventListener('input', () => {
             values[selected][key] = field.value;
+            if (key === 'imu_source') {
+                renderPanel();
+                return;
+            }
             if (key === 'camera') {
                 if (selected === 'intrinsics') {
                     values[selected].preset = field.value === 'vcamera'
@@ -218,6 +230,10 @@ function renderPanel() {
             if (selectedCamera && (overrideCapture || factoryMode || selected === 'imu')) payload.camera = selectedCamera;
             const usePreset = mode.fields.includes('preset') && command !== 'devices';
             const optional = usePreset ? ['preset'] : [];
+            if (selected === 'imu') {
+                optional.push('imu_source');
+                if (values.imu.imu_source === 'rion_imu406') optional.push('imu_port');
+            }
             if (command === 'capture' && ['galaxy', 'vcamera'].includes(selected)) {
                 optional.push('geometry');
                 if (selected === 'galaxy') optional.push('intrinsics');
@@ -365,6 +381,8 @@ fetch('/presets').then(response => response.json()).then(({target, presets, rece
         if (typeof preset === 'string') values[mode].preset ??= preset;
     }
     values.imu.geometry ??= presets.imu?.geometry;
+    values.imu.imu_source ??= presets.imu?.source || 'icm42670';
+    values.imu.imu_port ??= presets.imu?.rion?.port || 'auto';
     galaxyIntrinsicsPreset = presets.intrinsics || galaxyIntrinsicsPreset;
     values.imu.intrinsics ??= presets.imu?.intrinsics;
     renderPanel();

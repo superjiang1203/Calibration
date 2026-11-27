@@ -5,6 +5,12 @@
   "pivot": "configs/markers/pivot.json",
   "imu": {
     "geometry": "output/20261118_marker_C_planar_geometry/double_cube_geometry.yaml",
-    "intrinsics": "output/20261118_marker_C_planar_geometry/camera_intrinsics.yml"
+    "intrinsics": "output/20261118_marker_C_planar_geometry/camera_intrinsics.yml",
+    "source": "icm42670",
+    "rion": {
+      "port": "auto",
+      "baud": 115200,
+      "address": 0
+    }
   }
 }

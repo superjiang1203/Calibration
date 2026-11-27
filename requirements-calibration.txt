@@ -5,3 +5,4 @@ opencv-contrib-python>=4.8
 scipy>=1.11
 PyYAML>=6.0
 paramiko>=3.4
+pyserial>=3.5,<4

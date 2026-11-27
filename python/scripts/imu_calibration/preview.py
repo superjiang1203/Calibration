@@ -379,6 +379,7 @@ def main():
     parser.add_argument("--intrinsics")
     parser.add_argument("--serial", default="MAF26040019")
     parser.add_argument("--camera", choices=("galaxy", "vcamera"), default="galaxy")
+    parser.add_argument("--imu-source", choices=("icm42670", "rion_imu406"), default="icm42670")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--exposure-us", type=float, default=None)
@@ -414,7 +415,7 @@ def main():
     detector = cv2.aruco.ArucoDetector(
         cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_100), params
     )
-    imu_state = ImuState()
+    imu_state = ImuState(args.imu_source)
     settings_requests = Queue()
     setting_pending = threading.Event()
     shared = {

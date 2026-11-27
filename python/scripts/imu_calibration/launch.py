@@ -48,7 +48,7 @@ def upload(ssh, directory, geometry, intrinsics, remote_python):
     )
 
 
-def launch_local(args):
+def launch_local(args, producer):
     stopping = Event()
     with subprocess.Popen(
         [
@@ -63,6 +63,8 @@ def launch_local(args):
             args.serial,
             "--camera",
             args.camera,
+            "--imu-source",
+            args.imu_source,
             "--host",
             "127.0.0.1",
             "--port",
@@ -81,7 +83,7 @@ def launch_local(args):
                 print(line.rstrip(), flush=True)
                 if line.startswith("LIVE_URL "):
                     url = line.split()[1]
-                    relay = Thread(target=forward, args=(args.bridge, url, stopping))
+                    relay = Thread(target=forward, args=(producer, url, stopping))
                     workers.append(relay)
                     relay.start()
                     if not args.no_browser:
@@ -117,6 +119,10 @@ def main():
     parser.add_argument("--remote-python")
     parser.add_argument("--serial", default="MAF26040019")
     parser.add_argument("--camera", choices=("galaxy", "vcamera"), default="galaxy")
+    parser.add_argument("--imu-source", choices=("icm42670", "rion_imu406"), default="icm42670")
+    parser.add_argument("--imu-port", default="auto")
+    parser.add_argument("--imu-baud", type=int, default=115200)
+    parser.add_argument("--imu-address", type=int, default=0)
     parser.add_argument("--port", type=int, default=8879)
     parser.add_argument("--remote-port", type=int, default=8789)
     parser.add_argument(
@@ -131,14 +137,27 @@ def main():
         parser.error("Galaxy requires --intrinsics")
     if args.camera == "vcamera":
         args.intrinsics = None
-    for path in (args.geometry, args.intrinsics, args.bridge):
+    rion = args.imu_source == "rion_imu406"
+    for path in (args.geometry, args.intrinsics, None if rion else args.bridge):
         if path is not None and not path.is_file():
             parser.error(f"File not found: {path}")
+    if rion:
+        from importlib.util import find_spec
+
+        if find_spec("serial") is None:
+            parser.error("IMU406 requires pyserial in the Studio Python environment.")
+        if not args.imu_port.strip() or args.imu_baud <= 0 or not 0 <= args.imu_address <= 254:
+            parser.error("Invalid IMU406 serial port, baud rate or address.")
+        producer = [sys.executable, "-u", "-m", "python.scripts.imu_calibration.rion",
+                    "--port", args.imu_port, "--baud", str(args.imu_baud),
+                    "--address", str(args.imu_address)]
+    else:
+        producer = [str(args.bridge.resolve())]
 
     if args.local:
         if args.ssh:
             parser.error("--local and --ssh are mutually exclusive")
-        return launch_local(args)
+        return launch_local(args, producer)
     try:
         profile = load_profile(args.ssh_config, args.ssh) if args.ssh else {}
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -172,6 +191,8 @@ def main():
                     args.serial,
                     "--camera",
                     args.camera,
+                    "--imu-source",
+                    args.imu_source,
                     "--host",
                     "127.0.0.1",
                     "--port",
@@ -210,7 +231,7 @@ def main():
                     time.sleep(0.2)
             else:
                 raise RuntimeError(run_remote(ssh, "cat", f"{directory}/preview.log"))
-            worker = Thread(target=forward, args=(args.bridge, url, stopping))
+            worker = Thread(target=forward, args=(producer, url, stopping))
             worker.start()
             print(url, flush=True)
             if not args.no_browser:

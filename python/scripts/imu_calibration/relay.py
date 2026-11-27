@@ -1,4 +1,4 @@
-"""Run the genuine SDK bridge locally; forward latest poses to the live page."""
+"""Forward attitude packets from a local producer to the live page."""
 
 import json
 import socket
@@ -6,11 +6,10 @@ import subprocess
 import threading
 import time
 from collections import deque
-from pathlib import Path
 from urllib.parse import urlsplit
 
 
-def forward(bridge, url, stopping):
+def forward(command, url, stopping):
     address = urlsplit(url)
     if address.scheme != "http":
         raise ValueError("Use HTTP over the SSH tunnel")
@@ -18,9 +17,8 @@ def forward(bridge, url, stopping):
     lock = threading.Lock()
     changed = threading.Event()
     arrivals = {}
-    bridge = Path(bridge).resolve()
     process = subprocess.Popen(
-        [str(bridge)], stdout=subprocess.PIPE, text=True, bufsize=1
+        command, stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1
     )
 
     def receive():

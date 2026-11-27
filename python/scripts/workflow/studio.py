@@ -34,7 +34,7 @@ COMMANDS = {
 PREVIEW_PROFILES = {"galaxy": "configs/cameras/galaxy.json",
                     "vcamera": "configs/cameras/vcamera_color.json"}
 PATH_FIELDS = {"preset", "session", "calibration_dir", "geometry", "intrinsics",
-               "frame", "camera_intrinsics", "factory_output"}
+               "frame", "camera_intrinsics", "factory_output", "imu_port"}
 
 
 def launch_studio_browser(url, profile):
@@ -146,7 +146,7 @@ class Studio:
 
     def start(self, mode, *, command=None, session=None, calibration_dir=None,
               preset=None, geometry=None, intrinsics=None, frame=None, camera=None,
-              camera_intrinsics=None, factory_output=None):
+              camera_intrinsics=None, factory_output=None, imu_source=None, imu_port=None):
         with self.lock:
             if self.closing:
                 raise ValueError("工作台正在退出。")
@@ -157,7 +157,7 @@ class Studio:
             command = COMMANDS[mode][0] if command is None else command
             if command not in COMMANDS[mode]:
                 raise ValueError("该模式不支持此操作")
-            for path in (session, calibration_dir, preset, geometry, intrinsics, frame, camera_intrinsics, factory_output):
+            for path in (session, calibration_dir, preset, geometry, intrinsics, frame, camera_intrinsics, factory_output, imu_port):
                 if path is not None and (not isinstance(path, str) or not path.strip() or any(c in path for c in "\0\r\n")):
                     raise ValueError("请输入有效路径")
             offline = command in ("calibrate", "verify", "detect")
@@ -173,6 +173,8 @@ class Studio:
                 raise ValueError("参数与当前模式不匹配")
             if mode == "pivot" and not geometry:
                 raise ValueError("请选择已经标定好的 Marker 几何 YAML。")
+            if mode != "imu" and (imu_source is not None or imu_port is not None):
+                raise ValueError("串口选项用于 IMU 预览。")
             if tracking and (bool(intrinsics) != (bool(geometry) and mode == "galaxy")):
                 raise ValueError("Galaxy 追踪需要几何 YAML 和内参 YAML。RGB 预览自动读取 SDK 内参。")
             if bool(frame) != (mode == "vcamera" and command == "frame"):
@@ -198,6 +200,9 @@ class Studio:
             )
             if mode == "imu":
                 config = self.config[mode]
+                source = imu_source or config.get("source", "icm42670")
+                if source not in ("icm42670", "rion_imu406") or (imu_port and source != "rion_imu406"):
+                    raise ValueError("请选择有效的 IMU 数据源和串口。")
                 entry = "python.scripts.imu_calibration.launch"
                 arguments = [
                     "--no-browser",
@@ -207,8 +212,15 @@ class Studio:
                     geometry or config["geometry"],
                     "--camera",
                     camera or "galaxy",
+                    "--imu-source",
+                    source,
                     *location,
                 ]
+                if source == "rion_imu406":
+                    rion = config.get("rion", {})
+                    arguments.extend(("--imu-port", imu_port or rion.get("port") or "auto",
+                                      "--imu-baud", str(rion.get("baud", 115200)),
+                                      "--imu-address", str(rion.get("address", 0))))
                 if camera != "vcamera":
                     arguments.extend(("--intrinsics", intrinsics or config["intrinsics"]))
                 if self.args.ssh:
@@ -409,7 +421,7 @@ def main(argv=None):
                     options = json.loads(self.rfile.read(size)) if size else {}
                     if not isinstance(options, dict) or options.keys() - {
                         "command", "session", "calibration_dir", "preset", "geometry", "intrinsics", "frame",
-                        "camera", "camera_intrinsics", "factory_output",
+                        "camera", "camera_intrinsics", "factory_output", "imu_source", "imu_port",
                     }:
                         raise ValueError("任务参数无效")
                     studio.start(self.path.removeprefix("/start/"), **options)
